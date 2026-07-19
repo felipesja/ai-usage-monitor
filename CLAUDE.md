@@ -53,7 +53,8 @@ Todo o resto (TUI, widget) só renderiza o que este script produz. Fluxo:
 
 App nativo Tauri v2 + WebView2 (Windows) que espelha o modo compacto do TUI.
 
-- **Ponte de dados (`src-tauri/src/main.rs`, mod `bridge`):** mantém um `wsl.exe` filho persistente rodando `ai-usage bridge`, criado com `CREATE_NO_WINDOW` e stdio redirecionado — evita abrir terminal. Cada `fetch` escreve uma linha e lê a resposta JSON (pula até 5 linhas de lixo do shell de login procurando a que começa com `[`). A ponte é derrubada/recriada se responder inválido, e precisa de `shutdown()` explícito ao sair.
+- **Coletor nativo (`src-tauri/src/collector/`):** porta em Rust do coletor Python — `claude.rs` (refresh OAuth + usage/profile), `codex.rs` (JSON-RPC no `app-server`, via `codex.cmd` com `CREATE_NO_WINDOW`, com fallback para o cache de sessões), `cursor.rs` (admin_key/dashboard_cookie), `date.rs` (ISO-8601 sem `chrono`), `config.rs` (store em `%USERPROFILE%\.config\ai-usage-monitor\`). Serializa exatamente o mesmo JSON do Python, então o frontend serve aos dois. **Não há mais ponte WSL** — o app é self-contained. `--probe` imprime a coleta e sai, para diagnóstico sem GUI.
+- **Duas implementações do mesmo contrato:** ao mudar o formato de `Provider`/`Meter`, atualize o Python (`cli/usage_monitor.py`) e o Rust (`collector/mod.rs`) juntos.
 - **Frontend (`src/main.js`, `src/index.html`):** vanilla JS, sem framework, `withGlobalTauri`. Replica a lógica do TUI (cores por provedor, histerese de alertas). Comandos Tauri: `fetch_usage` (async, senão congela a UI), `hide_to_tray`, `frontend_ready`.
 - **Janela:** nasce oculta (evita flash branco), sem bordas, always-on-top, fora da taskbar, reposicionada no canto inferior direito a cada show (sem persistência de posição). Tray: click esquerdo alterna, direito → Sair. Autostart e notificações só no build release.
 
