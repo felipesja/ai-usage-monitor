@@ -4,6 +4,14 @@ Native desktop widget for **Windows** (Tauri) that pins the usage limits of mult
 
 It began as a terminal dashboard (TUI) and grew into the native app, which is now the primary way to use it. The Python collector — no external dependencies — still handles credential setup and doubles as a standalone terminal dashboard.
 
+<p align="center">
+  <img src="docs/widget.png" alt="AI Usage widget showing Claude, Codex, and Cursor limits" width="320">
+  &nbsp;&nbsp;
+  <img src="docs/widget-desktop.png" alt="The widget pinned to the bottom-right corner of the desktop" width="320">
+</p>
+
+<p align="center"><em>Screenshots use sample account data; the usage figures are real.</em></p>
+
 ## Desktop widget (Windows)
 
 Native Tauri v2 + WebView2 app (`widget/`):

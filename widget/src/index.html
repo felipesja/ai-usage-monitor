@@ -45,7 +45,10 @@
     header .status.fetching { color: var(--amber); }
     @keyframes spin { to { transform: rotate(360deg); } }
     header .status.fetching .icon { display: inline-block; animation: spin 1s linear infinite; }
-    .subtitle { color: var(--muted); font-size: 11px; margin-bottom: 8px; }
+    .subtitle-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+    .subtitle { color: var(--muted); font-size: 11px; }
+    /* Right-aligned so it sits directly under the header's timestamp. */
+    .autorefresh { margin-left: auto; color: var(--muted); font-size: 10.5px; }
     main { flex: 1; overflow-y: auto; scrollbar-width: none; }
     .provider { margin-bottom: 18px; }
     .provider-head { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
@@ -71,8 +74,7 @@
     .meter .reset { color: var(--muted); font-size: 11px; text-align: right; min-width: 8ch; }
     .meter.idle .label, .meter.idle .pct, .meter.idle .reset { color: var(--dim); }
     .meter.idle .pct { font-weight: 400; }
-    footer { color: var(--muted); font-size: 10.5px; padding-top: 4px; display: flex; flex-direction: column; gap: 3px; }
-    footer .commands { display: flex; align-items: center; }
+    footer { color: var(--muted); font-size: 10.5px; padding-top: 4px; display: flex; align-items: center; }
     footer .buttons { margin-left: auto; display: flex; gap: 10px; }
     footer .btn { color: var(--dim); cursor: pointer; font-size: 13px; }
     footer .btn:hover { color: var(--text); }
@@ -84,17 +86,17 @@
     <span class="brand">◆ AI USAGE</span>
     <span class="status" id="status"><span class="icon">○</span><span class="text">loading</span></span>
   </header>
-  <div class="subtitle" id="subtitle"></div>
+  <div class="subtitle-row">
+    <span class="subtitle" id="subtitle"></span>
+    <span class="autorefresh" id="autorefresh">auto-refresh every 60s</span>
+  </div>
   <main id="providers" data-tauri-drag-region></main>
   <footer>
-    <div class="autorefresh" id="autorefresh">auto-refresh every 60s</div>
-    <div class="commands">
-      <span>r refresh · esc hide</span>
-      <span class="buttons">
-        <span class="btn" id="refresh" title="refresh">↻</span>
-        <span class="btn close" id="close" title="hide to tray">✕</span>
-      </span>
-    </div>
+    <span>r refresh · esc hide</span>
+    <span class="buttons">
+      <span class="btn" id="refresh" title="refresh">↻</span>
+      <span class="btn close" id="close" title="hide to tray">✕</span>
+    </span>
   </footer>
   <script src="main.js"></script>
 </body>
