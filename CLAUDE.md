@@ -2,62 +2,62 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Idioma
+## Language
 
-Comentários, strings visíveis ao usuário, mensagens de erro e docs são em **português (pt-BR)**. Mantenha esse padrão ao editar.
+Comments, user-visible strings, error messages, and docs are in **English**. Keep that standard when editing.
 
-## Comandos
+## Commands
 
-O coletor é um único script Python sem dependências externas (só stdlib), em `cli/usage_monitor.py`. Instalado como `ai-usage` (symlink `~/.local/bin/ai-usage` → `cli/usage_monitor.py`).
+The collector is a single Python script with no external dependencies (stdlib only), at `cli/usage_monitor.py`. Installed as `ai-usage` (symlink `~/.local/bin/ai-usage` → `cli/usage_monitor.py`).
 
 ```bash
-python3 cli/usage_monitor.py doctor    # verifica configuração (perfis Claude, CLI Codex, Cursor)
-python3 cli/usage_monitor.py once      # uma leitura em texto; --json para JSON
-python3 cli/usage_monitor.py watch     # abre o TUI curses (--interval N, --alert N)
-ai-usage bridge                    # loop stdin→JSON de linha única (consumido pelo widget)
+python3 cli/usage_monitor.py doctor    # check the setup (Claude profiles, Codex CLI, Cursor)
+python3 cli/usage_monitor.py once      # one reading as text; --json for JSON
+python3 cli/usage_monitor.py watch     # open the curses TUI (--interval N, --alert N)
 ```
 
-Não há suíte de testes, linter ou build para o script Python — é executado direto.
+There is no test suite, linter, or build for the Python script — it runs directly.
 
-### Widget Tauri (`widget/`)
+### Tauri widget (`widget/`)
 
-O build **precisa rodar no filesystem do Windows** (cargo falha em `\\wsl.localhost`). Não compila a partir do WSL. Fluxo (PowerShell, no workspace Windows sincronizado):
+The build **must run on the Windows filesystem** (cargo fails under `\\wsl.localhost`). It does not compile from WSL. Flow (PowerShell, in the synced Windows workspace):
 
 ```powershell
 npm install
 npm run dev      # dev
-npm run build    # release: .exe + instalador NSIS em src-tauri\target\release\bundle\nsis\
+npm run build    # release: .exe + NSIS installer in src-tauri\target\release\bundle\nsis\
 ```
 
-Ícones: `npx tauri icon caminho\para\icone.png`.
+Icons: `npx tauri icon path\to\icon.png`.
 
-## Arquitetura
+## Architecture
 
-### Coletor Python (`cli/usage_monitor.py`) — fonte única de verdade
+### Python collector (`cli/usage_monitor.py`) — credential setup + terminal dashboard
 
-Todo o resto (TUI, widget) só renderiza o que este script produz. Fluxo:
+Registers the credentials that both collectors read, and renders the terminal dashboard. Flow:
 
-- **Modelo de dados:** dataclasses `Provider` (nome, conta, plano, email, `standby`, lista de `Meter`, `error`) e `Meter` (label, percent, reset_at, used, limit). Serializados via `asdict` para `--json`/`bridge`.
-- **`collect_all()`** faz fan-out com `ThreadPoolExecutor` sobre: cada perfil Claude em `~/.config/ai-usage-monitor/claude/*/`, mais Codex e Cursor. Cada `collect_*` **captura suas próprias exceções** e retorna um `Provider` com `.error` preenchido — nunca propaga. Depois `mark_standby()` compara os emails Claude com a conta ativa da CLI (`~/.claude.json`) e marca `◉ STANDBY` na que não está logada.
-- **Claude:** OAuth com refresh automático de token (`refresh_claude` renova quando falta <2min), lê `oauth/usage` e `oauth/profile`. Multi-conta: perfis isolados em subdiretórios com `.credentials.json`.
-- **Codex:** tenta o `app-server` via JSON-RPC sobre stdio (`codex_live`); em falha cai para o cache local das sessões (`codex_cached` lê o último `token_count` em `~/.codex/sessions/*.jsonl`) e sinaliza o downgrade em `details`. `codex_bin()` contorna o PATH: ignora shims de `/mnt/` (Windows) e procura o binário Linux via nvm.
-- **Cursor:** dois métodos em `cursor.json` — `admin_key` (API admin de equipe, preferencial) ou `dashboard_cookie` (endpoint interno do dashboard, pode quebrar se o Cursor mudar). O dashboard de equipe divide as unidades de request por 4 (`request_scale`).
+- **Data model:** dataclasses `Provider` (name, account, plan, email, `standby`, list of `Meter`, `error`) and `Meter` (label, percent, reset_at, used, limit). Serialized via `asdict` for `--json`.
+- **`collect_all()`** fans out with a `ThreadPoolExecutor` over: each Claude profile in `~/.config/ai-usage-monitor/claude/*/`, plus Codex and Cursor. Each `collect_*` **captures its own exceptions** and returns a `Provider` with `.error` filled in — it never propagates. Then `mark_standby()` compares the Claude emails against the CLI's active account (`~/.claude.json`) and flags `◉ STANDBY` on the one not logged in.
+- **Credential setup — Python only:** `claude-login`, `claude-add`, `claude-list`, `cursor-cookie`, `cursor-admin`. The Rust collector only *reads* the store and refreshes existing tokens; it cannot create a credential. So the Python script stays required for onboarding.
+- **Claude:** OAuth with automatic token refresh (`refresh_claude` renews when under 2 min remain), reads `oauth/usage` and `oauth/profile`. Multi-account: profiles isolated in subdirectories with `.credentials.json`.
+- **Codex:** tries the `app-server` via JSON-RPC over stdio (`codex_live`); on failure falls back to the local session cache (`codex_cached` reads the last `token_count` in `~/.codex/sessions/*.jsonl`) and flags the downgrade in `details`. `codex_bin()` works around PATH: it ignores `/mnt/` shims (Windows) and looks up the Linux binary via nvm.
+- **Cursor:** two methods in `cursor.json` — `admin_key` (team admin API, preferred) or `dashboard_cookie` (internal dashboard endpoint, may break if Cursor changes it). The team dashboard divides request units by 4 (`request_scale`).
 
-### Renderização
+### Rendering
 
-- `plain()` — saída texto do `once`.
-- `tui()` — TUI curses com **thread de fetch em background** (o loop de desenho nunca bloqueia; spinner enquanto busca). Dois layouts: cards (2 colunas se largura ≥96) e `draw_compact_tui` (lista alinhada) para janelas pequenas. Usa synchronized output DEC 2026 (`\x1b[?2026h/l`) para compor sem tearing e um `redrawwin` no resize para limpar artefatos.
-- **Alertas:** `alert_meters` com histerese — notifica 1x ao cruzar o limiar, re-arma só quando o uso cai abaixo. `notify_windows` dispara toast via `powershell.exe` (WinRT); no-op fora do WSL.
+- `plain()` — text output for `once`.
+- `tui()` — curses TUI with a **background fetch thread** (the draw loop never blocks; spinner while fetching). Two layouts: cards (2 columns if width ≥96) and `draw_compact_tui` (aligned list) for small windows. Uses synchronized output DEC 2026 (`\x1b[?2026h/l`) to compose without tearing, and a `redrawwin` on resize to clear artifacts.
+- **Alerts:** `alert_meters` with hysteresis — notifies once on crossing the threshold, re-arms only when usage drops back below. `notify_windows` fires a toast via `powershell.exe` (WinRT); no-op outside WSL.
 
-### Widget Tauri (`widget/`)
+### Tauri widget (`widget/`)
 
-App nativo Tauri v2 + WebView2 (Windows) que espelha o modo compacto do TUI.
+Native Tauri v2 + WebView2 app (Windows) mirroring the TUI's compact mode.
 
-- **Coletor nativo (`src-tauri/src/collector/`):** porta em Rust do coletor Python — `claude.rs` (refresh OAuth + usage/profile), `codex.rs` (JSON-RPC no `app-server`, via `codex.cmd` com `CREATE_NO_WINDOW`, com fallback para o cache de sessões), `cursor.rs` (admin_key/dashboard_cookie), `date.rs` (ISO-8601 sem `chrono`), `config.rs` (store em `%USERPROFILE%\.config\ai-usage-monitor\`). Serializa exatamente o mesmo JSON do Python, então o frontend serve aos dois. **Não há mais ponte WSL** — o app é self-contained. `--probe` imprime a coleta e sai, para diagnóstico sem GUI.
-- **Duas implementações do mesmo contrato:** ao mudar o formato de `Provider`/`Meter`, atualize o Python (`cli/usage_monitor.py`) e o Rust (`collector/mod.rs`) juntos.
-- **Frontend (`src/main.js`, `src/index.html`):** vanilla JS, sem framework, `withGlobalTauri`. Replica a lógica do TUI (cores por provedor, histerese de alertas). Comandos Tauri: `fetch_usage` (async, senão congela a UI), `hide_to_tray`, `frontend_ready`.
-- **Janela:** nasce oculta (evita flash branco), sem bordas, always-on-top, fora da taskbar, reposicionada no canto inferior direito a cada show (sem persistência de posição). Tray: click esquerdo alterna, direito → Sair. Autostart e notificações só no build release.
+- **Native collector (`src-tauri/src/collector/`):** a Rust port of the Python collector — `claude.rs` (OAuth refresh + usage/profile), `codex.rs` (JSON-RPC against the `app-server`, via `codex.cmd` with `CREATE_NO_WINDOW`, falling back to the session cache), `cursor.rs` (admin_key/dashboard_cookie), `date.rs` (ISO-8601 without `chrono`), `config.rs` (store in `%USERPROFILE%\.config\ai-usage-monitor\`). It serializes exactly the same JSON as Python, so the frontend serves both. **There is no WSL bridge** — the app is self-contained. `--probe` prints the collection and exits, for diagnosis without the GUI.
+- **Two implementations of the same contract:** when changing the shape of `Provider`/`Meter`, update the Python (`cli/usage_monitor.py`) and the Rust (`collector/mod.rs`) together. The same goes for user-visible meter labels and `details` strings, so both surfaces read alike.
+- **Frontend (`src/main.js`, `src/index.html`):** vanilla JS, no framework, `withGlobalTauri`. Replicates the TUI's logic (per-provider colors, alert hysteresis). Tauri commands: `fetch_usage` (async, otherwise it freezes the UI), `hide_to_tray`, `frontend_ready`.
+- **Window:** starts hidden (avoids the white flash), borderless, always-on-top, out of the taskbar, repositioned to the bottom-right corner on every show (no position persistence). Tray: left click toggles, right → Quit. Autostart and notifications only in release builds.
 
-## Segurança
+## Security
 
-Tokens/cookies/chaves nunca aparecem no painel nem em argumentos de processo. Diretórios de config `0700`, arquivos de credencial `0600` (ver `ensure_private_dir`/`write_private_json`). Nunca copiar credenciais para chats, issues ou commits.
+Tokens/cookies/keys never appear in the dashboard or in process arguments. Config directories `0700`, credential files `0600` (see `ensure_private_dir`/`write_private_json`). Never copy credentials into chats, issues, or commits.

@@ -1,6 +1,6 @@
-//! Limites do Cursor Business. Dois métodos em `cursor.json`: `admin_key`
-//! (API admin de equipe, preferencial) ou `dashboard_cookie` (endpoint interno
-//! do dashboard, pode quebrar se o Cursor mudar). Porta de `collect_cursor`.
+//! Cursor Business limits. Two methods in `cursor.json`: `admin_key` (team
+//! admin API, preferred) or `dashboard_cookie` (internal dashboard endpoint,
+//! may break if Cursor changes it). Port of `collect_cursor`.
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -15,7 +15,7 @@ pub fn collect() -> Provider {
         return Provider::with_error(
             "Cursor",
             "Business",
-            "configure com: ai-usage cursor-cookie ou cursor-admin".into(),
+            "set it up with: ai-usage cursor-cookie or cursor-admin".into(),
         );
     }
     match read_json(&path).and_then(|config| run(&config)) {
@@ -35,7 +35,7 @@ fn by_cookie(config: &Value) -> Result<Provider, String> {
     let token = config
         .get("session_cookie")
         .and_then(Value::as_str)
-        .ok_or("cursor.json sem session_cookie")?;
+        .ok_or("cursor.json has no session_cookie")?;
     let cookie = format!("WorkosCursorSessionToken={token}");
     let client = super::http_client()?;
 
@@ -76,8 +76,8 @@ fn by_cookie(config: &Value) -> Result<Provider, String> {
         None
     };
 
-    // O dashboard de equipe apresenta as unidades de request a 1/4 dos valores
-    // internos devolvidos por usage-summary (576/2000 -> 144/500).
+    // The team dashboard shows request units at 1/4 of the internal values
+    // returned by usage-summary (576/2000 -> 144/500).
     let scale = if data.get("limitType").and_then(Value::as_str) == Some("team") {
         4.0
     } else {
@@ -91,7 +91,7 @@ fn by_cookie(config: &Value) -> Result<Provider, String> {
 
     if let Some(auto) = plan.get("autoPercentUsed").and_then(Value::as_f64) {
         if auto != 0.0 {
-            provider.meters.push(Meter::new("Uso do Auto", Some(auto), billing_end));
+            provider.meters.push(Meter::new("Auto usage", Some(auto), billing_end));
         }
     }
     let demand = data
@@ -101,7 +101,7 @@ fn by_cookie(config: &Value) -> Result<Provider, String> {
         .unwrap_or(Value::Null);
     if demand.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
         let used = demand.get("used").and_then(Value::as_f64).unwrap_or(0.0) / 100.0;
-        provider.details.push(format!("Sob demanda: ${used:.2}"));
+        provider.details.push(format!("On demand: ${used:.2}"));
     }
     Ok(provider)
 }
@@ -110,7 +110,7 @@ fn by_admin_key(config: &Value) -> Result<Provider, String> {
     let key = config
         .get("admin_key")
         .and_then(Value::as_str)
-        .ok_or("cursor.json sem admin_key")?;
+        .ok_or("cursor.json has no admin_key")?;
     let email = config.get("email").and_then(Value::as_str).unwrap_or("");
     let auth = base64::engine::general_purpose::STANDARD.encode(format!("{key}:"));
 
@@ -139,14 +139,14 @@ fn by_admin_key(config: &Value) -> Result<Provider, String> {
                 .is_some_and(|value| value.eq_ignore_ascii_case(email))
         })
         .or_else(|| members.first())
-        .ok_or("usuário não encontrado no retorno da equipe")?;
+        .ok_or("user not found in the team response")?;
 
     let reset = data
         .get("subscriptionCycleStart")
         .and_then(Value::as_f64)
         .map(next_month_iso);
     let mut provider = Provider::new("Cursor", "Business", "Team", email);
-    for (key_name, label) in [("totalPercentUsed", "Uso total"), ("autoPercentUsed", "Auto")] {
+    for (key_name, label) in [("totalPercentUsed", "Total usage"), ("autoPercentUsed", "Auto")] {
         if let Some(percent) = member.get(key_name).and_then(Value::as_f64) {
             provider.meters.push(Meter::new(label, Some(percent), reset.clone()));
         }
@@ -157,13 +157,13 @@ fn by_admin_key(config: &Value) -> Result<Provider, String> {
         .or_else(|| member.get("hardLimitOverrideDollars"))
         .and_then(Value::as_f64);
     provider.details.push(match limit {
-        Some(value) => format!("Gasto: ${spent:.2} / ${value:.2}"),
-        None => format!("Gasto: ${spent:.2}"),
+        Some(value) => format!("Spend: ${spent:.2} / ${value:.2}"),
+        None => format!("Spend: ${spent:.2}"),
     });
     Ok(provider)
 }
 
-/// Inteiro sem casas quando exato (equivale ao `display_number` do Python).
+/// Integer with no decimals when exact (matches Python's `display_number`).
 fn display_number(value: f64) -> String {
     if value.fract() == 0.0 {
         format!("{value:.0}")

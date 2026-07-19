@@ -1,6 +1,6 @@
-//! Coleta os limites de uma conta Claude a partir de um perfil salvo em
-//! `~/.config/ai-usage-monitor/claude/<nome>/.credentials.json`, renovando o
-//! token OAuth quando necessário. Porta de `collect_claude`/`refresh_claude`.
+//! Collects the limits of a Claude account from a profile stored at
+//! `~/.config/ai-usage-monitor/claude/<name>/.credentials.json`, refreshing the
+//! OAuth token when needed. Port of `collect_claude`/`refresh_claude`.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,11 +45,11 @@ fn run(profile_dir: &Path, name: &str) -> Result<Provider, String> {
 
     let oauth = data
         .get("claudeAiOauth")
-        .ok_or("o arquivo não contém uma sessão OAuth do Claude")?;
+        .ok_or("the file does not contain a Claude OAuth session")?;
     let token = oauth
         .get("accessToken")
         .and_then(Value::as_str)
-        .ok_or("credencial sem accessToken")?
+        .ok_or("credential has no accessToken")?
         .to_string();
     let plan = title_case(oauth.get("subscriptionType").and_then(Value::as_str).unwrap_or(""));
 
@@ -83,18 +83,18 @@ fn run(profile_dir: &Path, name: &str) -> Result<Provider, String> {
     if let Some(extra) = usage.get("extra_usage") {
         if extra.get("is_enabled").and_then(Value::as_bool).unwrap_or(false) {
             let used = extra.get("utilization").and_then(Value::as_f64).unwrap_or(0.0);
-            provider.details.push(format!("Uso extra: {used}%"));
+            provider.details.push(format!("Extra usage: {used}%"));
         }
     }
     Ok(provider)
 }
 
-/// Renova o access token se faltar menos de 2 min para expirar; grava de volta.
+/// Refreshes the access token if it expires in under 2 min; writes it back.
 fn refresh(path: &Path, data: &mut Value) -> Result<(), String> {
     let (refresh_token, scopes) = {
         let oauth = data
             .get("claudeAiOauth")
-            .ok_or("o arquivo não contém uma sessão OAuth do Claude")?;
+            .ok_or("the file does not contain a Claude OAuth session")?;
         let expires_at = oauth.get("expiresAt").and_then(Value::as_f64).unwrap_or(0.0);
         if expires_at > now_ms() + 120_000.0 {
             return Ok(());
@@ -102,7 +102,7 @@ fn refresh(path: &Path, data: &mut Value) -> Result<(), String> {
         let refresh_token = oauth
             .get("refreshToken")
             .and_then(Value::as_str)
-            .ok_or("credencial sem refreshToken")?
+            .ok_or("credential has no refreshToken")?
             .to_string();
         let scopes = oauth
             .get("scopes")
@@ -139,7 +139,7 @@ fn refresh(path: &Path, data: &mut Value) -> Result<(), String> {
     let oauth = data
         .get_mut("claudeAiOauth")
         .and_then(Value::as_object_mut)
-        .ok_or("claudeAiOauth inválido")?;
+        .ok_or("invalid claudeAiOauth")?;
     if let Some(access) = response.get("access_token").and_then(Value::as_str) {
         oauth.insert("accessToken".into(), json!(access));
     }
@@ -172,7 +172,7 @@ fn get_json(client: &reqwest::blocking::Client, url: &str, token: &str) -> Resul
         .map_err(|err| err.to_string())
 }
 
-/// Equivalente a `str.title()` do Python para textos curtos de plano.
+/// Equivalent to Python's `str.title()` for short plan strings.
 fn title_case(value: &str) -> String {
     value
         .split_whitespace()

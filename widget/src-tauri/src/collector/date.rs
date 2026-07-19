@@ -1,5 +1,5 @@
-//! Conversões de data em ISO-8601 UTC, suficientes para os campos de reset —
-//! evita puxar a crate `chrono` só por isto. Algoritmos civis de Howard Hinnant.
+//! ISO-8601 UTC date conversions, enough for the reset fields — avoids pulling
+//! in the `chrono` crate just for this. Civil algorithms by Howard Hinnant.
 
 pub fn epoch_to_iso(seconds: f64) -> String {
     let total = seconds as i64;
@@ -9,8 +9,8 @@ pub fn epoch_to_iso(seconds: f64) -> String {
     iso(year, month, day, secs / 3600, (secs % 3600) / 60, secs % 60)
 }
 
-/// Mesmo dia do mês seguinte (clampado ao último dia), a partir de epoch em ms.
-/// Porta de `next_month` do coletor Python — usado no ciclo de cobrança do Cursor.
+/// Same day next month (clamped to the last day), from an epoch in ms.
+/// Port of the Python collector's `next_month` — used for Cursor's billing cycle.
 pub fn next_month_iso(epoch_ms: f64) -> String {
     let total = (epoch_ms / 1000.0) as i64;
     let days = total.div_euclid(86_400);
@@ -38,7 +38,7 @@ fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
-/// Dias desde 1970-01-01 → (ano, mês, dia).
+/// Days since 1970-01-01 → (year, month, day).
 pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

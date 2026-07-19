@@ -28,8 +28,8 @@ from typing import Any
 try:
     import curses
 except ModuleNotFoundError:
-    # O Python do Windows não traz curses. Só o TUI (`watch`) depende dele;
-    # os demais comandos — inclusive o setup das credenciais — seguem valendo.
+    # Windows Python ships without curses. Only the TUI (`watch`) needs it; the
+    # other commands — credential setup included — keep working.
     curses = None  # type: ignore[assignment]
 
 
@@ -106,18 +106,18 @@ def request_json(
         message = f"HTTP {exc.code}"
         try:
             payload = json.loads(exc.read().decode("utf-8"))
-            message += f": {payload.get('error', payload.get('message', 'falha na API'))}"
+            message += f": {payload.get('error', payload.get('message', 'API failure'))}"
         except Exception:
             pass
         raise RuntimeError(message) from None
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"rede indisponível: {exc.reason}") from None
+        raise RuntimeError(f"network unavailable: {exc.reason}") from None
 
 
 def safe_name(value: str) -> str:
     value = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip()).strip("-.")
     if not value:
-        raise ValueError("nome de perfil inválido")
+        raise ValueError("invalid profile name")
     return value
 
 
@@ -126,10 +126,10 @@ def claude_add(name: str, source: Path) -> None:
     data = read_json(source)
     oauth = data.get("claudeAiOauth") or {}
     if not oauth.get("accessToken") or not oauth.get("refreshToken"):
-        raise RuntimeError("o arquivo não contém uma sessão OAuth completa do Claude")
+        raise RuntimeError("the file does not contain a complete Claude OAuth session")
     target = CLAUDE_DIR / name / ".credentials.json"
     write_private_json(target, data)
-    print(f"Perfil Claude '{name}' cadastrado em {target.parent}")
+    print(f"Claude profile '{name}' registered at {target.parent}")
 
 
 def claude_login(name: str, email: str | None) -> None:
@@ -145,10 +145,10 @@ def claude_login(name: str, email: str | None) -> None:
         try:
             subprocess.run(command, env=env, check=True)
         except subprocess.CalledProcessError as exc:
-            raise RuntimeError(f"login do Claude terminou com código {exc.returncode}") from None
+            raise RuntimeError(f"Claude login exited with code {exc.returncode}") from None
         source = temp_dir / ".credentials.json"
         if not source.exists():
-            raise RuntimeError("o login terminou sem criar uma credencial")
+            raise RuntimeError("login finished without creating a credential")
         claude_add(name, source)
 
 
@@ -209,7 +209,7 @@ def collect_claude(profile_dir: Path) -> Provider:
                 result.meters.append(Meter(label, float(block.get("utilization", 0)), block.get("resets_at")))
         extra = usage.get("extra_usage") or {}
         if extra.get("is_enabled"):
-            result.details.append(f"Uso extra: {extra.get('utilization', 0)}%")
+            result.details.append(f"Extra usage: {extra.get('utilization', 0)}%")
         return result
     except Exception as exc:
         return Provider("Claude", name, error=str(exc))
@@ -226,13 +226,13 @@ def rpc_read(proc: subprocess.Popen[str], messages: queue.Queue[dict[str, Any]],
             if "error" in message:
                 raise RuntimeError(str(message["error"]))
             return message["result"]
-    raise RuntimeError("Codex não respondeu a tempo")
+    raise RuntimeError("Codex did not respond in time")
 
 
 def codex_bin() -> str:
-    # Em shells não-interativos o PATH do nvm não carrega, e o PATH do
-    # Windows (via WSL) oferece um shim npm de /mnt/c que não roda aqui —
-    # só aceita o which se for um binário do próprio Linux.
+    # On WSL the nvm PATH is not loaded in non-interactive shells, and the
+    # Windows PATH offers an npm shim from /mnt/c that cannot run there —
+    # only accept `which` if it points at a native Linux binary.
     found = shutil.which("codex")
     if found and not found.startswith("/mnt/"):
         return found
@@ -240,17 +240,24 @@ def codex_bin() -> str:
     return str(candidates[-1]) if candidates else (found or "codex")
 
 
+def codex_command(binary: str) -> list[str]:
+    # On Windows `which` resolves to the npm shim `codex.CMD`, which
+    # CreateProcess cannot execute directly — it has to go through cmd.exe.
+    if os.name == "nt" and binary.lower().endswith((".cmd", ".bat")):
+        return ["cmd.exe", "/C", binary, "app-server", "--stdio"]
+    return [binary, "app-server", "--stdio"]
+
+
 def codex_live() -> dict[str, Any]:
     binary = codex_bin()
     env = os.environ.copy()
-    # O codex é um script Node: garante o node do mesmo diretório no PATH.
+    # codex is a Node script: make sure the node from the same dir is on PATH.
     env["PATH"] = f"{Path(binary).parent}{os.pathsep}{env.get('PATH', '')}"
-    stderr_log = open("/tmp/ai-usage-codex-stderr.log", "ab")
     proc = subprocess.Popen(
-        [binary, "app-server", "--stdio"],
+        codex_command(binary),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=stderr_log,
+        stderr=subprocess.DEVNULL,
         text=True,
         bufsize=1,
         start_new_session=True,
@@ -282,14 +289,14 @@ def codex_live() -> dict[str, Any]:
         try:
             rpc_read(proc, messages, 1, 5)
         except RuntimeError as exc:
-            raise RuntimeError(f"{exc} (fase init, exit={proc.poll()})") from None
+            raise RuntimeError(f"{exc} (init phase, exit={proc.poll()})") from None
         proc.stdin.write('{"method":"initialized"}\n')
         proc.stdin.write('{"method":"account/rateLimits/read","id":2}\n')
         proc.stdin.flush()
         try:
             return rpc_read(proc, messages, 2, 15)
         except RuntimeError as exc:
-            raise RuntimeError(f"{exc} (fase rateLimits, exit={proc.poll()})") from None
+            raise RuntimeError(f"{exc} (rateLimits phase, exit={proc.poll()})") from None
     finally:
         proc.terminate()
         try:
@@ -311,7 +318,7 @@ def codex_cached() -> dict[str, Any]:
             except json.JSONDecodeError:
                 continue
     if found is None:
-        raise RuntimeError("nenhum limite foi encontrado nas sessões locais")
+        raise RuntimeError("no limits were found in the local sessions")
     return {"rateLimits": found}
 
 
@@ -336,15 +343,16 @@ def collect_codex() -> Provider:
             data = codex_cached()
             live_error = str(exc) or type(exc).__name__
             try:
-                with open("/tmp/ai-usage-codex.log", "a", encoding="utf-8") as log:
-                    log.write(f"{dt.datetime.now():%H:%M:%S} codex_live falhou: {live_error}\n")
+                log_path = Path(tempfile.gettempdir()) / "ai-usage-codex.log"
+                with log_path.open("a", encoding="utf-8") as log:
+                    log.write(f"{dt.datetime.now():%H:%M:%S} codex_live failed: {live_error}\n")
             except OSError:
                 pass
         raw = data.get("rateLimits") or {}
         plan = raw.get("planType", raw.get("plan_type", ""))
         result = Provider("Codex", "ChatGPT", str(plan).replace("_", " ").title(), codex_email())
         if live_error:
-            result.details.append(f"⚠ cache local · app-server: {live_error}")
+            result.details.append(f"⚠ local cache · app-server: {live_error}")
         for key in ("primary", "secondary"):
             block = raw.get(key)
             if not block:
@@ -358,7 +366,7 @@ def collect_codex() -> Provider:
             result.meters.append(Meter(label, float(percent), reset))
         credits = raw.get("credits") or {}
         if credits.get("hasCredits", credits.get("has_credits")):
-            result.details.append(f"Créditos: {credits.get('balance', '?')}")
+            result.details.append(f"Credits: {credits.get('balance', '?')}")
         return result
     except Exception as exc:
         return Provider("Codex", "ChatGPT", error=str(exc))
@@ -375,7 +383,7 @@ def next_month(epoch_ms: int) -> str:
 
 def collect_cursor() -> Provider:
     if not CURSOR_CONFIG.exists():
-        return Provider("Cursor", "Business", "Team", error="configure com: ai-usage cursor-cookie ou cursor-admin")
+        return Provider("Cursor", "Business", "Team", error="set it up with: ai-usage cursor-cookie or cursor-admin")
     try:
         config = read_json(CURSOR_CONFIG)
         if config["method"] == "dashboard_cookie":
@@ -413,10 +421,10 @@ def collect_cursor() -> Provider:
             )
             auto_percent = plan.get("autoPercentUsed")
             if auto_percent:
-                result.meters.append(Meter("Uso do Auto", float(auto_percent), data.get("billingCycleEnd")))
+                result.meters.append(Meter("Auto usage", float(auto_percent), data.get("billingCycleEnd")))
             demand = (data.get("individualUsage") or {}).get("onDemand") or {}
             if demand.get("enabled"):
-                result.details.append(f"Sob demanda: ${float(demand.get('used', 0)) / 100:.2f}")
+                result.details.append(f"On demand: ${float(demand.get('used', 0)) / 100:.2f}")
             return result
 
         key = config["admin_key"]
@@ -431,15 +439,15 @@ def collect_cursor() -> Provider:
         email = config.get("email", "")
         member = next((item for item in members if item.get("email", "").lower() == email.lower()), members[0] if members else {})
         if not member:
-            raise RuntimeError("usuário não encontrado no retorno da equipe")
+            raise RuntimeError("user not found in the team response")
         reset = next_month(int(data["subscriptionCycleStart"])) if data.get("subscriptionCycleStart") else None
         result = Provider("Cursor", "Business", "Team", email)
-        for key_name, label in (("totalPercentUsed", "Uso total"), ("autoPercentUsed", "Auto")):
+        for key_name, label in (("totalPercentUsed", "Total usage"), ("autoPercentUsed", "Auto")):
             if member.get(key_name) is not None:
                 result.meters.append(Meter(label, float(member[key_name]), reset))
         spent = float(member.get("spendCents", 0)) / 100
         limit = member.get("monthlyLimitDollars") or member.get("hardLimitOverrideDollars")
-        result.details.append(f"Gasto: ${spent:.2f}" + (f" / ${float(limit):.2f}" if limit else ""))
+        result.details.append(f"Spend: ${spent:.2f}" + (f" / ${float(limit):.2f}" if limit else ""))
         return result
     except Exception as exc:
         return Provider("Cursor", "Business", error=str(exc))
@@ -504,14 +512,14 @@ def reset_text(value: str | None) -> str:
         local = dt.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
     except ValueError:
         return value
-    return f"renova {local:%d/%m %H:%M} ({remaining})" if remaining else value
+    return f"renews {local:%b %d %H:%M} ({remaining})" if remaining else value
 
 
 WINDOWS_POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 
 
 def notify_windows(title: str, body: str) -> None:
-    """Toast nativo do Windows via WinRT; no-op fora do WSL."""
+    """Native Windows toast via WinRT; no-op outside WSL."""
     powershell = WINDOWS_POWERSHELL if os.path.exists(WINDOWS_POWERSHELL) else shutil.which("powershell.exe")
     if not powershell:
         return
@@ -549,9 +557,10 @@ def alert_meters(results: list[Provider], threshold: int, alerted: set[tuple[str
         for meter in provider.meters:
             if meter.percent is None:
                 continue
-            # Histerese: alerta 1x ao cruzar o limiar e só re-arma quando o
-            # uso cai abaixo dele (ex.: janela renovada). reset_at não entra
-            # na chave porque alguns provedores oscilam o valor entre fetches.
+            # Hysteresis: alert once when crossing the threshold, and only
+            # re-arm when usage drops back below it (e.g. the window renewed).
+            # reset_at is kept out of the key because some providers jitter it
+            # between fetches.
             key = (provider.label(), meter.label)
             if meter.percent < threshold:
                 alerted.discard(key)
@@ -560,7 +569,7 @@ def alert_meters(results: list[Provider], threshold: int, alerted: set[tuple[str
                 continue
             alerted.add(key)
             remaining = reset_remaining(meter.reset_at)
-            body = f"{meter.label} em {meter.percent:.0f}%" + (f" · renova em {remaining}" if remaining else "")
+            body = f"{meter.label} at {meter.percent:.0f}%" + (f" · renews in {remaining}" if remaining else "")
             notify_windows(f"{provider.name} · {provider.label()}", body)
 
 
@@ -694,7 +703,7 @@ def draw_card(
         tui_add(screen, row, x + 3, meter.label, inner_width - len(value) - 1, colors["text"])
         tui_add(screen, row, x + width - len(value) - 3, value, len(value), curses.A_BOLD)
         attr = meter_attr(meter.percent, accent, colors)
-        reset = reset_remaining(meter.reset_at) or "inativa"
+        reset = reset_remaining(meter.reset_at) or "idle"
         tui_add(screen, row + 1, x + 3, tui_bar(meter.percent, inner_width - len(reset) - 2), inner_width - len(reset) - 2, attr)
         tui_add(screen, row + 1, x + width - len(reset) - 3, reset, len(reset), colors["muted"])
 
@@ -736,7 +745,7 @@ def draw_compact_tui(screen: Any, results: list[Provider], top: int, colors: dic
                     label = f"{label} {meter.used}/{meter.limit}"
                 else:
                     pct = f"{meter.used}/{meter.limit}"
-            reset = reset_remaining(meter.reset_at) or "inativa"
+            reset = reset_remaining(meter.reset_at) or "idle"
             attr = meter_attr(meter.percent, accent, colors)
             tui_add(screen, row, 4, label, min(label_w, max(1, pct_end - len(pct) - 5)), colors["text"])
             if bar_w >= 4:
@@ -790,8 +799,8 @@ def tui(screen: Any, interval: int, alert: int = 80) -> None:
         if key == ord("r"):
             wake_event.set()
         elif key == curses.KEY_RESIZE:
-            # Repinta do zero após resize: descarta o diff do curses e limpa
-            # os artefatos que sobram na tela.
+            # Repaint from scratch after a resize: drop the curses diff and
+            # clear the artifacts left on screen.
             curses.update_lines_cols()
             force_full = True
             last_draw_key = None
@@ -816,13 +825,13 @@ def tui(screen: Any, interval: int, alert: int = 80) -> None:
         if width >= 60:
             tui_add(screen, 1, 15, "/ overview", 15, colors["muted"])
         if fetching:
-            status = f"{SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]} atualizando"
+            status = f"{SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]} refreshing"
             status_attr = colors["amber"]
         else:
-            status = f"● {updated_at:%H:%M:%S}" if updated_at else "○ carregando"
+            status = f"● {updated_at:%H:%M:%S}" if updated_at else "○ loading"
             status_attr = colors["green"]
         tui_add(screen, 1, max(2, width - len(status) - 3), status, len(status), status_attr)
-        info = f"{len(results)} contas · auto {interval}s" if width < 60 else f"{len(results)} assinaturas · atualização automática em {interval}s"
+        info = f"{len(results)} accounts · auto {interval}s" if width < 60 else f"{len(results)} subscriptions · auto-refresh every {interval}s"
         tui_add(screen, 2, 2, info, width - 4, colors["muted"])
 
         content_top = 4
@@ -845,13 +854,13 @@ def tui(screen: Any, interval: int, alert: int = 80) -> None:
         else:
             draw_compact_tui(screen, results, content_top, colors)
 
-        footer = "r atualizar · q sair"
+        footer = "r refresh · q quit"
         tui_add(screen, height - 2, 2, footer, width - 4, colors["muted"])
         if force_full:
             force_full = False
             screen.redrawwin()
-        # Synchronized output (DEC 2026): o terminal compõe o frame de forma
-        # atômica, sem tearing no meio do redraw.
+        # Synchronized output (DEC 2026): the terminal composes the frame
+        # atomically, with no tearing mid-redraw.
         sys.stdout.write("\x1b[?2026h")
         sys.stdout.flush()
         screen.refresh()
@@ -863,57 +872,56 @@ def tui(screen: Any, interval: int, alert: int = 80) -> None:
 
 
 def cursor_cookie() -> None:
-    value = getpass.getpass("WorkosCursorSessionToken (entrada oculta): ").strip()
+    value = getpass.getpass("WorkosCursorSessionToken (hidden input): ").strip()
     value = value.removeprefix("WorkosCursorSessionToken=")
     if not value:
-        raise RuntimeError("cookie vazio")
-    # Colar em prompt oculto falha silenciosamente em alguns consoles (o valor
-    # chega truncado). Sem esta checagem, o erro só apareceria depois, como um
-    # HTTP 400 opaco na coleta.
+        raise RuntimeError("empty cookie")
+    # Pasting into a hidden prompt fails silently on some consoles (the value
+    # arrives truncated). Without this check the error would only surface later,
+    # as an opaque HTTP 400 during collection.
     if len(value) < 100 or not ("%3A%3A" in value or "::" in value):
         raise RuntimeError(
-            "o cookie não parece um WorkosCursorSessionToken completo "
-            f"(recebidos {len(value)} caracteres); verifique se a colagem funcionou"
+            "the cookie does not look like a complete WorkosCursorSessionToken "
+            f"(got {len(value)} characters); check whether the paste worked"
         )
     write_private_json(CURSOR_CONFIG, {"method": "dashboard_cookie", "session_cookie": value})
-    print(f"Sessão do Cursor salva em {CURSOR_CONFIG}")
+    print(f"Cursor session saved to {CURSOR_CONFIG}")
 
 
 def cursor_admin(email: str) -> None:
-    key = getpass.getpass("Cursor Admin API Key (entrada oculta): ").strip()
+    key = getpass.getpass("Cursor Admin API Key (hidden input): ").strip()
     if not key.startswith("key_"):
-        raise RuntimeError("a chave deve começar com key_")
+        raise RuntimeError("the key must start with key_")
     write_private_json(CURSOR_CONFIG, {"method": "admin_key", "admin_key": key, "email": email})
-    print(f"Chave administrativa do Cursor salva em {CURSOR_CONFIG}")
+    print(f"Cursor admin key saved to {CURSOR_CONFIG}")
 
 
 def doctor() -> None:
-    print(f"Configuração: {CONFIG_DIR}")
-    print(f"Claude: {len(list(CLAUDE_DIR.glob('*/.credentials.json'))) if CLAUDE_DIR.exists() else 0} perfil(is)")
-    print(f"Codex CLI: {'ok' if shutil.which('codex') else 'não encontrado'}")
-    print(f"Cursor: {'configurado' if CURSOR_CONFIG.exists() else 'não configurado'}")
+    print(f"Config: {CONFIG_DIR}")
+    print(f"Claude: {len(list(CLAUDE_DIR.glob('*/.credentials.json'))) if CLAUDE_DIR.exists() else 0} profile(s)")
+    print(f"Codex CLI: {'ok' if shutil.which('codex') else 'not found'}")
+    print(f"Cursor: {'configured' if CURSOR_CONFIG.exists() else 'not configured'}")
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     sub = result.add_subparsers(dest="command")
-    watch = sub.add_parser("watch", help="abrir o TUI")
+    watch = sub.add_parser("watch", help="open the TUI")
     watch.add_argument("--interval", type=int, default=60)
-    watch.add_argument("--alert", type=int, default=80, help="notificar quando um limite atingir N%% (0 desliga)")
-    once = sub.add_parser("once", help="imprimir uma leitura e sair")
+    watch.add_argument("--alert", type=int, default=80, help="notify when a limit reaches N%% (0 disables)")
+    once = sub.add_parser("once", help="print a single reading and exit")
     once.add_argument("--json", action="store_true")
-    add = sub.add_parser("claude-add", help="capturar a sessão Claude atualmente ativa")
+    add = sub.add_parser("claude-add", help="capture the currently active Claude session")
     add.add_argument("name")
     add.add_argument("--source", type=Path, default=Path.home() / ".claude" / ".credentials.json")
-    login = sub.add_parser("claude-login", help="autenticar uma conta Claude sem alterar a sessão padrão")
+    login = sub.add_parser("claude-login", help="authenticate a Claude account without changing the default session")
     login.add_argument("name")
     login.add_argument("--email")
-    sub.add_parser("claude-list", help="listar perfis Claude")
-    sub.add_parser("cursor-cookie", help="cadastrar cookie do dashboard Cursor")
-    admin = sub.add_parser("cursor-admin", help="cadastrar Cursor Admin API Key")
+    sub.add_parser("claude-list", help="list Claude profiles")
+    sub.add_parser("cursor-cookie", help="register the Cursor dashboard cookie")
+    admin = sub.add_parser("cursor-admin", help="register a Cursor Admin API Key")
     admin.add_argument("--email", required=True)
-    sub.add_parser("doctor", help="verificar a configuração")
-    sub.add_parser("bridge", help="loop stdin→JSON compacto (usado pelo widget)")
+    sub.add_parser("doctor", help="check the configuration")
     return result
 
 
@@ -937,18 +945,13 @@ def main() -> int:
         elif command == "once":
             results = collect_all()
             print(json.dumps([asdict(item) for item in results], indent=2) if getattr(args, "json", False) else plain(results))
-        elif command == "bridge":
-            # Uma linha no stdin = uma coleta; resposta em JSON de linha única.
-            for _ in sys.stdin:
-                results = collect_all()
-                print(json.dumps([asdict(item) for item in results], separators=(",", ":")), flush=True)
         else:
             if curses is None:
-                raise RuntimeError("o TUI precisa do módulo curses, ausente neste Python; use 'once' ou o widget")
+                raise RuntimeError("the TUI needs the curses module, missing in this Python; use 'once' or the widget")
             curses.wrapper(tui, getattr(args, "interval", 60), getattr(args, "alert", 80))
         return 0
     except (OSError, RuntimeError, ValueError) as exc:
-        print(f"erro: {exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
 

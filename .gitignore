@@ -16,10 +16,10 @@ widget/src-tauri/gen/
 # Playwright MCP scratch
 .playwright-mcp/
 
-# Binários / executáveis
+# Binaries / executables
 *.exe
 
-# SO / editor
+# OS / editor
 .DS_Store
 Thumbs.db
 *.swp

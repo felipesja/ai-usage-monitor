@@ -2,7 +2,7 @@ const { invoke } = window.__TAURI__.core;
 const notification = window.__TAURI__.notification;
 
 const INTERVAL_MS = 60_000;
-const ALERT_PERCENT = 80; // 0 desliga
+const ALERT_PERCENT = 80; // 0 disables
 const alerted = new Set();
 
 const ACCENT = { Claude: "var(--claude)", Codex: "var(--openai)", Cursor: "var(--cursor)" };
@@ -28,9 +28,9 @@ function checkAlerts(providers) {
   for (const provider of providers) {
     for (const meter of provider.meters || []) {
       if (meter.percent == null) continue;
-      // Histerese: alerta 1x ao cruzar o limiar e só re-arma quando o uso
-      // cai abaixo dele (ex.: janela renovada). Não usa reset_at na chave
-      // porque alguns provedores oscilam esse valor entre fetches.
+      // Hysteresis: alert once when crossing the threshold, and only re-arm
+      // when usage drops back below it (e.g. the window renewed). reset_at is
+      // kept out of the key because some providers jitter it between fetches.
       const key = `${provider.email || provider.account}|${meter.label}`;
       if (meter.percent < ALERT_PERCENT) {
         alerted.delete(key);
@@ -41,7 +41,7 @@ function checkAlerts(providers) {
       const remaining = resetRemaining(meter.reset_at);
       notification.sendNotification({
         title: `${provider.name} · ${provider.email || provider.account}`,
-        body: `${meter.label} em ${Math.round(meter.percent)}%` + (remaining ? ` · renova em ${remaining}` : ""),
+        body: `${meter.label} at ${Math.round(meter.percent)}%` + (remaining ? ` · renews in ${remaining}` : ""),
       });
     }
   }
@@ -65,8 +65,8 @@ function render(providers) {
     name.className = `provider-name ${provider.name}`;
     name.textContent = provider.name;
     nameRow.appendChild(name);
-    // Com 2+ contas do mesmo provedor, o coletor marca standby na que não
-    // está logada no CLI — a sem selo é a ativa no momento.
+    // With 2+ accounts on the same provider, the collector flags standby on
+    // the one not logged into the CLI — the unbadged one is currently active.
     if (provider.standby) {
       const badge = document.createElement("span");
       badge.className = "badge standby";
@@ -97,8 +97,8 @@ function render(providers) {
     for (const meter of provider.meters || []) {
       const row = document.createElement("div");
       const remaining = resetRemaining(meter.reset_at);
-      // Sem reset_at = janela ainda não aberta (a sessão de 5h só começa no
-      // primeiro request). Renderiza a linha apagada em vez de "0% inativa".
+      // No reset_at = window not open yet (the 5h session only starts on the
+      // first request). Render the row dimmed instead of "0% idle".
       const idle = !remaining && !meter.percent;
       row.className = idle ? "meter idle" : "meter";
       const color = idle ? "var(--dim)" : meterColor(meter.percent, provider.name);
@@ -155,17 +155,17 @@ function setStatus(icon, text, fetching) {
 async function refresh() {
   if (refreshing) return;
   refreshing = true;
-  setStatus("↻", "atualizando", true);
+  setStatus("↻", "refreshing", true);
   try {
     const raw = await invoke("fetch_usage");
     const providers = JSON.parse(raw);
     render(providers);
     checkAlerts(providers);
-    setStatus("●", new Date().toLocaleTimeString("pt-BR"), false);
-    document.getElementById("subtitle").textContent =
-      `${providers.length} assinaturas · atualização automática em ${INTERVAL_MS / 1000}s`;
+    // en-GB keeps the 24h HH:MM:SS shape the compact layout is sized for.
+    setStatus("●", new Date().toLocaleTimeString("en-GB"), false);
+    document.getElementById("subtitle").textContent = `${providers.length} subscriptions`;
   } catch (error) {
-    setStatus("!", "falha na atualização", true);
+    setStatus("!", "refresh failed", true);
     console.error(error);
   } finally {
     refreshing = false;
@@ -179,9 +179,11 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "r") refresh();
 });
 
-// A janela nasce oculta. Esperar um frame garante que o WebView já tenha
-// composto o conteúdo antes de um click no tray poder mostrá-la.
+// The window starts hidden. Waiting one frame guarantees the WebView has
+// composited the content before a tray click can show it.
 requestAnimationFrame(() => invoke("frontend_ready").catch(console.error));
+
+document.getElementById("autorefresh").textContent = `auto-refresh every ${INTERVAL_MS / 1000}s`;
 
 refresh();
 setInterval(refresh, INTERVAL_MS);

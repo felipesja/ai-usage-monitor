@@ -1,6 +1,6 @@
-//! Localização e I/O do store de credenciais, espelhando o layout do coletor
-//! Python: `%USERPROFILE%\.config\ai-usage-monitor\`. As permissões 0600/0700
-//! do Python são no-op no Windows; aqui confiamos na ACL do perfil do usuário.
+//! Location and I/O for the credential store, mirroring the Python collector's
+//! layout: `%USERPROFILE%\.config\ai-usage-monitor\`. Python's 0600/0700
+//! permissions are a no-op on Windows; here we rely on the user profile's ACL.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,8 +26,8 @@ pub fn cursor_config() -> PathBuf {
     config_dir().join("cursor.json")
 }
 
-/// `~/.claude.json` da CLI do Claude Code — usado (temporariamente) para saber
-/// qual conta está ativa. Some quando o standby dinâmico entrar (fase 4).
+/// The Claude Code CLI's `~/.claude.json` — used (temporarily) to know which
+/// account is active. Goes away once dynamic standby lands (phase 4).
 pub fn claude_active_file() -> PathBuf {
     home().join(".claude.json")
 }

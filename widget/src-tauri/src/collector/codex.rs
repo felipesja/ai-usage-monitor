@@ -1,6 +1,6 @@
-//! Limites do Codex. Tenta o `app-server` via JSON-RPC sobre stdio e, em caso
-//! de falha, cai para o cache local das sessões — sinalizando o downgrade em
-//! `details`, como o coletor Python.
+//! Codex limits. Tries the `app-server` via JSON-RPC over stdio and, on
+//! failure, falls back to the local session cache — flagging the downgrade in
+//! `details`, like the Python collector.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -42,7 +42,7 @@ pub fn collect() -> Provider {
         .replace('_', " ");
     let mut provider = Provider::new("Codex", "ChatGPT", &title_case(&plan), &email());
     if let Some(err) = downgrade {
-        provider.details.push(format!("⚠ cache local · app-server: {err}"));
+        provider.details.push(format!("⚠ local cache · app-server: {err}"));
     }
 
     for key in ["primary", "secondary"] {
@@ -66,7 +66,7 @@ pub fn collect() -> Provider {
             .and_then(Value::as_f64);
         let reset = block.get("resetsAt").or_else(|| block.get("resets_at"));
         let reset_at = match reset {
-            // Epoch em segundos vira ISO-8601 UTC (o frontend faz `new Date`).
+            // Epoch seconds become ISO-8601 UTC (the frontend does `new Date`).
             Some(Value::Number(number)) => number.as_f64().map(epoch_to_iso),
             Some(Value::String(text)) => Some(text.clone()),
             _ => None,
@@ -85,14 +85,14 @@ pub fn collect() -> Provider {
                 .get("balance")
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "?".into());
-            provider.details.push(format!("Créditos: {balance}"));
+            provider.details.push(format!("Credits: {balance}"));
         }
     }
     provider
 }
 
-/// Shim do npm no Windows (`codex.cmd`) ou binário no PATH. O `.cmd` não pode
-/// ser executado direto pelo `Command`; precisa passar pelo `cmd.exe /C`.
+/// The npm shim on Windows (`codex.cmd`) or the binary on PATH. A `.cmd` can't
+/// be executed directly by `Command`; it has to go through `cmd.exe /C`.
 fn codex_command() -> Result<Command, String> {
     #[cfg(windows)]
     {
@@ -123,9 +123,9 @@ fn live() -> Result<Value, String> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = command.spawn().map_err(|err| format!("app-server não iniciou: {err}"))?;
+    let mut child = command.spawn().map_err(|err| format!("app-server did not start: {err}"))?;
 
-    let stdout = child.stdout.take().ok_or("app-server sem stdout")?;
+    let stdout = child.stdout.take().ok_or("app-server has no stdout")?;
     let (sender, receiver) = mpsc::channel::<Value>();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -138,7 +138,7 @@ fn live() -> Result<Value, String> {
     });
 
     let result = (|| -> Result<Value, String> {
-        let stdin = child.stdin.as_mut().ok_or("app-server sem stdin")?;
+        let stdin = child.stdin.as_mut().ok_or("app-server has no stdin")?;
         let init = serde_json::json!({
             "method": "initialize",
             "id": 1,
@@ -149,13 +149,13 @@ fn live() -> Result<Value, String> {
         });
         writeln!(stdin, "{init}").map_err(|err| err.to_string())?;
         stdin.flush().map_err(|err| err.to_string())?;
-        wait_for(&receiver, 1, Duration::from_secs(5)).map_err(|err| format!("{err} (fase init)"))?;
+        wait_for(&receiver, 1, Duration::from_secs(5)).map_err(|err| format!("{err} (init phase)"))?;
 
         writeln!(stdin, "{}", r#"{"method":"initialized"}"#).map_err(|err| err.to_string())?;
         writeln!(stdin, "{}", r#"{"method":"account/rateLimits/read","id":2}"#)
             .map_err(|err| err.to_string())?;
         stdin.flush().map_err(|err| err.to_string())?;
-        wait_for(&receiver, 2, Duration::from_secs(15)).map_err(|err| format!("{err} (fase rateLimits)"))
+        wait_for(&receiver, 2, Duration::from_secs(15)).map_err(|err| format!("{err} (rateLimits phase)"))
     })();
 
     terminate(&mut child);
@@ -167,7 +167,7 @@ fn wait_for(receiver: &mpsc::Receiver<Value>, id: i64, timeout: Duration) -> Res
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err("Codex não respondeu a tempo".into());
+            return Err("Codex did not respond in time".into());
         }
         match receiver.recv_timeout(left) {
             Ok(message) => {
@@ -178,7 +178,7 @@ fn wait_for(receiver: &mpsc::Receiver<Value>, id: i64, timeout: Duration) -> Res
                     return Ok(message.get("result").cloned().unwrap_or(Value::Null));
                 }
             }
-            Err(_) => return Err("Codex não respondeu a tempo".into()),
+            Err(_) => return Err("Codex did not respond in time".into()),
         }
     }
 }
@@ -188,10 +188,10 @@ fn terminate(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Último `token_count` com `rate_limits` na sessão mais recente.
+/// Last `token_count` carrying `rate_limits` in the most recent session.
 fn cached() -> Result<Value, String> {
     let dir = home().join(".codex").join("sessions");
-    let latest = newest_jsonl(&dir).ok_or("nenhuma sessão local encontrada")?;
+    let latest = newest_jsonl(&dir).ok_or("no local session found")?;
     let file = std::fs::File::open(&latest).map_err(|err| err.to_string())?;
     let mut found = None;
     for line in BufReader::new(file).lines().map_while(Result::ok) {
@@ -205,7 +205,7 @@ fn cached() -> Result<Value, String> {
             }
         }
     }
-    let limits = found.ok_or("nenhum limite foi encontrado nas sessões locais")?;
+    let limits = found.ok_or("no limits were found in the local sessions")?;
     Ok(serde_json::json!({ "rateLimits": limits }))
 }
 
@@ -230,7 +230,7 @@ fn newest_jsonl(dir: &std::path::Path) -> Option<PathBuf> {
     best.map(|(_, path)| path)
 }
 
-/// E-mail a partir das claims do `id_token` em `~/.codex/auth.json`.
+/// Email from the `id_token` claims in `~/.codex/auth.json`.
 fn email() -> String {
     let Ok(auth) = read_json(&home().join(".codex").join("auth.json")) else {
         return String::new();

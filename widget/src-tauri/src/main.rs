@@ -11,9 +11,9 @@ use tauri_plugin_autostart::ManagerExt;
 
 mod collector;
 
-/// Coleta os limites nativamente (sem ponte WSL) e devolve o JSON que o
-/// frontend renderiza. Async + spawn_blocking: a coleta faz I/O de rede e
-/// congelaria a UI (e as animações) se rodasse na thread principal do Tauri.
+/// Collects the limits natively (no WSL bridge) and returns the JSON the
+/// frontend renders. Async + spawn_blocking: collection does network I/O and
+/// would freeze the UI (and its animations) on Tauri's main thread.
 #[tauri::command]
 async fn fetch_usage() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -34,8 +34,8 @@ struct TrayState {
     last_toggle: Option<Instant>,
 }
 
-/// Canto inferior direito da área de trabalho. Sem persistência de posição:
-/// todo show reposiciona, mesmo que a janela tenha sido arrastada.
+/// Bottom-right corner of the work area. No position persistence: every show
+/// repositions, even if the window was dragged elsewhere.
 fn apply_position(window: &WebviewWindow) -> tauri::Result<()> {
     if let Some(monitor) = window.current_monitor()? {
         let area = monitor.work_area();
@@ -62,7 +62,7 @@ fn hide_widget(app: &AppHandle) {
 #[tauri::command]
 fn hide_to_tray(app: AppHandle, state: tauri::State<'_, Mutex<TrayState>>) {
     {
-        let mut st = state.lock().expect("estado do tray envenenado");
+        let mut st = state.lock().expect("tray state poisoned");
         st.pinned = false;
     }
     hide_widget(&app);
@@ -71,7 +71,7 @@ fn hide_to_tray(app: AppHandle, state: tauri::State<'_, Mutex<TrayState>>) {
 #[tauri::command]
 fn frontend_ready(app: AppHandle, state: tauri::State<'_, Mutex<TrayState>>) {
     let show = {
-        let mut st = state.lock().expect("estado do tray envenenado");
+        let mut st = state.lock().expect("tray state poisoned");
         st.frontend_ready = true;
         st.pinned
     };
@@ -101,9 +101,9 @@ fn on_tray_event(app: &AppHandle, event: TrayIconEvent) {
             }
             let action = {
                 let state = app.state::<Mutex<TrayState>>();
-                let mut st = state.lock().expect("estado do tray envenenado");
+                let mut st = state.lock().expect("tray state poisoned");
                 let now = Instant::now();
-                // Double-click gera dois Clicks; sem debounce o widget "pisca".
+                // A double-click emits two Clicks; without debounce it flickers.
                 if st
                     .last_toggle
                     .is_some_and(|last| now.duration_since(last) < TOGGLE_DEBOUNCE)
@@ -139,13 +139,13 @@ fn on_tray_event(app: &AppHandle, event: TrayIconEvent) {
 }
 
 fn main() {
-    // `ai-usage-widget --probe` imprime a coleta em JSON e sai, sem subir a
-    // janela. Serve para diagnosticar o coletor sem depender da GUI.
+    // `ai-usage-widget --probe` prints the collection as JSON and exits without
+    // bringing up the window. Useful to diagnose the collector without the GUI.
     if std::env::args().any(|arg| arg == "--probe") {
         let providers = collector::collect_all();
         match serde_json::to_string_pretty(&providers) {
             Ok(json) => println!("{json}"),
-            Err(err) => eprintln!("erro ao serializar: {err}"),
+            Err(err) => eprintln!("serialization error: {err}"),
         }
         return;
     }
@@ -162,7 +162,7 @@ fn main() {
             frontend_ready
         ])
         .on_window_event(|window, event| {
-            // Alt+F4 (e qualquer close) vira esconder para a tray.
+            // Alt+F4 (and any close) becomes hide-to-tray.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let app = window.app_handle();
@@ -173,28 +173,28 @@ fn main() {
             }
         })
         .setup(|app| {
-            // Iniciar com o Windows (entrada em Run do registro).
-            // Só no release: em dev o exe é temporário e não deve ficar no registro.
+            // Start with Windows (a Run entry in the registry). Release only: in
+            // dev the exe is temporary and should not linger in the registry.
             #[cfg(not(debug_assertions))]
             let _ = app.autolaunch().enable();
 
             app.manage(Mutex::new(TrayState::default()));
 
-            // Posiciona já no setup para o primeiro show (janela nasce oculta).
-            let window = app.get_webview_window("main").expect("janela main ausente");
+            // Position during setup for the first show (window starts hidden).
+            let window = app.get_webview_window("main").expect("main window missing");
             apply_position(&window)?;
 
-            let quit = MenuItemBuilder::with_id("quit", "Sair").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app).item(&quit).build()?;
             TrayIconBuilder::with_id("tray")
                 .icon(
                     app.default_window_icon()
-                        .expect("ícone padrão ausente")
+                        .expect("default icon missing")
                         .clone(),
                 )
                 .tooltip("AI Usage")
                 .menu(&menu)
-                // Sem isso, click esquerdo abre o menu em vez de togglar.
+                // Without this, a left click opens the menu instead of toggling.
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
                     if event.id().as_ref() == "quit" {
@@ -206,5 +206,5 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("erro ao iniciar o AI Usage Widget");
+        .expect("failed to start AI Usage Widget");
 }

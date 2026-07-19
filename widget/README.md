@@ -1,27 +1,32 @@
-# AI Usage Widget — app Tauri
+# AI Usage Widget — Tauri app
 
-Widget de desktop nativo (Tauri v2 + WebView2) com a UI do modo compacto do TUI: mesmas cores por provedor, barras, `%`, tempo de renovação, marcador `◉ STANDBY`.
+Native desktop widget (Tauri v2 + WebView2) carrying the UI of the TUI's compact mode: same per-provider colors, bars, `%`, renewal time, and `◉ STANDBY` marker.
 
-## Como funciona
+## How it works
 
-- **Dados**: o Rust mantém uma ponte `wsl.exe` com stdio redirecionado e `CREATE_NO_WINDOW`, sem abrir terminal. O front-end solicita cada leitura por essa ponte e renderiza o JSON — o coletor Python continua sendo a única fonte de verdade.
-- **Janela**: sem bordas, sempre no topo, fora da taskbar (`alwaysOnTop`, `decorations: false`, `skipTaskbar`), fixa no canto inferior direito da work area (calculada no `setup` do Rust). Ela nasce oculta e só pode ser mostrada depois que o frontend estiver pronto, evitando o flash branco inicial do WebView.
-- **Iniciar com o Windows**: `tauri-plugin-autostart` (entrada no registro, habilitada no primeiro run do build release).
-- **Notificações**: `tauri-plugin-notification` quando um limite cruza 80% — uma vez ao cruzar, re-armando quando o uso cai abaixo do limiar (histerese).
-- **Tray**: o app inicia oculto, só com o ícone na bandeja. Click esquerdo abre a janela com foco (click de novo esconde); click direito → "Sair" encerra o app e a ponte WSL.
-- **Interação**: `r` ou o botão `↻` atualizam; `q`/`Esc`, `✕` ou Alt+F4 escondem para a bandeja; arrastar em qualquer área vazia move a janela (ao reabrir, volta ao canto).
+- **Data**: collection runs natively in Rust inside the app (`src-tauri/src/collector/`), talking to the Claude, Codex, and Cursor APIs directly. There is no WSL bridge and no external process — the frontend requests each reading through the `fetch_usage` command and renders the JSON.
+- **Window**: borderless, always on top, out of the taskbar (`alwaysOnTop`, `decorations: false`, `skipTaskbar`), pinned to the bottom-right of the work area (computed in Rust's `setup`). It starts hidden and can only be shown once the frontend is ready, avoiding the WebView's initial white flash.
+- **Start with Windows**: `tauri-plugin-autostart` (registry entry, enabled on the first run of a release build).
+- **Notifications**: `tauri-plugin-notification` when a limit crosses 80% — once on crossing, re-arming when usage drops back below the threshold (hysteresis).
+- **Tray**: the app starts hidden, with only the tray icon. Left click opens the window with focus (click again to hide); right click → "Quit" exits the app.
+- **Interaction**: `r` or the `↻` button refresh; `q`/`Esc`, `✕`, or Alt+F4 hide to the tray; dragging any empty area moves the window (it returns to the corner on reopen).
 
-## Compilar
+## Building
 
-Requisitos no Windows (instaláveis via winget): Rust (rustup, toolchain MSVC), Visual Studio Build Tools 2022 com C++, WebView2 Runtime, Node.js.
+Requirements on Windows (installable via winget): Rust (rustup, MSVC toolchain), Visual Studio Build Tools 2022 with C++, WebView2 Runtime, Node.js.
 
-O build precisa rodar no filesystem do Windows (cargo não funciona bem em `\\wsl.localhost`). Copie este diretório para um workspace no disco do Windows (ex.: `%USERPROFILE%\dev\ai-usage-widget`) e sincronize as mudanças para lá antes de compilar.
+The build must run on the Windows filesystem — cargo does not work well under `\\wsl.localhost`, so it cannot be compiled from WSL.
 
 ```powershell
-cd %USERPROFILE%\dev\ai-usage-widget
 npm install
-npm run dev      # modo dev
-npm run build    # release: src-tauri\target\release\ai-usage-widget.exe + instalador NSIS em ...\release\bundle\nsis\
+npm run dev      # dev mode
+npm run build    # release: src-tauri\target\release\ai-usage-widget.exe + NSIS installer in ...\release\bundle\nsis\
 ```
 
-Os ícones em `src-tauri/icons/` já estão gerados; para trocar, use `npx tauri icon caminho\para\icone.png`.
+The icons in `src-tauri/icons/` are already generated; to change them, use `npx tauri icon path\to\icon.png`.
+
+## Diagnostics
+
+```powershell
+ai-usage-widget.exe --probe   # prints the collected JSON and exits, without the GUI
+```

@@ -1,7 +1,7 @@
-//! Coletor nativo — porta do `usage_monitor.py` para dentro do app Tauri.
-//! Cada `collect_*` captura a própria falha e devolve um `Provider` com `error`
-//! preenchido; nunca propaga. A serialização espelha o `asdict` do Python para
-//! o frontend (`src/main.js`) consumir sem mudanças.
+//! Native collector — a port of `usage_monitor.py` into the Tauri app.
+//! Each `collect_*` captures its own failure and returns a `Provider` with
+//! `error` filled in; it never propagates. Serialization mirrors the Python
+//! `asdict` so the frontend (`src/main.js`) consumes it unchanged.
 
 pub mod config;
 mod claude;
@@ -69,7 +69,7 @@ impl Provider {
     }
 }
 
-/// Cliente HTTP compartilhado pelos coletores (timeout curto, TLS via rustls).
+/// HTTP client shared by the collectors (short timeout, TLS via rustls).
 pub fn http_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(12))
@@ -90,10 +90,10 @@ pub fn collect_all() -> Vec<Provider> {
         let cursor = scope.spawn(cursor::collect);
 
         for handle in claude_handles {
-            providers.push(handle.join().expect("thread do coletor Claude entrou em panic"));
+            providers.push(handle.join().expect("Claude collector thread panicked"));
         }
-        providers.push(codex.join().expect("thread do coletor Codex entrou em panic"));
-        providers.push(cursor.join().expect("thread do coletor Cursor entrou em panic"));
+        providers.push(codex.join().expect("Codex collector thread panicked"));
+        providers.push(cursor.join().expect("Cursor collector thread panicked"));
     });
 
     mark_standby(&mut providers);
@@ -115,8 +115,9 @@ fn claude_profiles() -> Vec<PathBuf> {
     out
 }
 
-/// Standby provisório (fase 1): lê o e-mail ativo da CLI do Claude Code, como o
-/// Python faz. A fase 4 troca isto por detecção via delta de uso entre leituras.
+/// Provisional standby (phase 1): reads the active email from the Claude Code
+/// CLI, like Python does. Phase 4 replaces this with detection via usage delta
+/// between reads.
 fn mark_standby(providers: &mut [Provider]) {
     if providers.iter().filter(|p| p.name == "Claude").count() < 2 {
         return;
