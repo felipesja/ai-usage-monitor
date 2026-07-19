@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <title>AI Usage Widget</title>
+  <style>
+    :root {
+      --bg: rgba(27, 29, 30, 0.93);
+      --cyan: #5fd7d7;
+      --claude: #d7875f;
+      --openai: #00af87;
+      --cursor: #d0d0d0;
+      --amber: #ffaf00;
+      --green: #5fd787;
+      --red: #ff5f5f;
+      --muted: #8a8a8a;
+      --dim: #585858;
+      --text: #eeeeee;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; scrollbar-width: none; }
+    ::-webkit-scrollbar { display: none; width: 0; height: 0; }
+    html, body { height: 100%; background: transparent; overflow: hidden; }
+    body {
+      font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", Consolas, monospace;
+      font-size: 12.5px;
+      color: var(--text);
+      background: var(--bg);
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 10px 14px;
+      overflow: hidden;
+      user-select: none;
+      cursor: default;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding-bottom: 2px;
+    }
+    header .brand { color: var(--cyan); font-weight: 700; }
+    header .status { margin-left: auto; color: var(--green); font-size: 11px; display: flex; align-items: center; gap: 4px; }
+    header .status.fetching { color: var(--amber); }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    header .status.fetching .icon { display: inline-block; animation: spin 1s linear infinite; }
+    .subtitle { color: var(--muted); font-size: 11px; margin-bottom: 8px; }
+    main { flex: 1; overflow-y: auto; scrollbar-width: none; }
+    .provider { margin-bottom: 18px; }
+    .provider-head { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+    .identity { flex: 1; min-width: 0; }
+    .name-row { display: flex; align-items: baseline; gap: 8px; }
+    .provider-name { font-weight: 700; }
+    .provider-name.Claude { color: var(--claude); }
+    .provider-name.Codex { color: var(--openai); }
+    .provider-name.Cursor { color: var(--cursor); }
+    .plan { margin-left: auto; color: var(--muted); font-size: 10.5px; }
+    .badge { font-size: 10px; font-weight: 700; white-space: nowrap; }
+    .badge.standby { color: var(--cyan); }
+    .email { color: var(--muted); font-size: 10.5px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .error { color: var(--red); font-size: 11px; }
+    .detail { color: var(--muted); font-size: 10.5px; padding-left: 10px; margin-top: 2px; }
+    .detail.warn { color: var(--amber); }
+    .meter { display: grid; grid-template-columns: 1fr auto auto; gap: 3px 8px; align-items: center; padding: 1px 0 1px 10px; }
+    .meter + .meter { margin-top: 6px; }
+    .meter .label { color: var(--text); font-size: 12px; white-space: nowrap; overflow: hidden; }
+    .meter .bar { grid-column: 1 / -1; height: 7px; background: rgba(255, 255, 255, 0.09); border-radius: 3px; overflow: hidden; margin-top: 1px; }
+    .meter .bar > div { height: 100%; border-radius: 3px; }
+    .meter .pct { font-weight: 700; font-size: 12px; text-align: right; min-width: 4ch; }
+    .meter .reset { color: var(--muted); font-size: 11px; text-align: right; min-width: 8ch; }
+    .meter.idle .label, .meter.idle .pct, .meter.idle .reset { color: var(--dim); }
+    .meter.idle .pct { font-weight: 400; }
+    footer { color: var(--muted); font-size: 10.5px; padding-top: 4px; display: flex; align-items: center; }
+    footer .buttons { margin-left: auto; display: flex; gap: 10px; }
+    footer .btn { color: var(--dim); cursor: pointer; font-size: 13px; }
+    footer .btn:hover { color: var(--text); }
+    footer .btn.close:hover { color: var(--red); }
+  </style>
+</head>
+<body data-tauri-drag-region>
+  <header data-tauri-drag-region>
+    <span class="brand">◆ AI USAGE</span>
+    <span class="status" id="status"><span class="icon">○</span><span class="text">carregando</span></span>
+  </header>
+  <div class="subtitle" id="subtitle">atualização automática em 60s</div>
+  <main id="providers" data-tauri-drag-region></main>
+  <footer>
+    <span>r atualiza · esc esconde</span>
+    <span class="buttons">
+      <span class="btn" id="refresh" title="atualizar">↻</span>
+      <span class="btn close" id="close" title="esconder para a bandeja">✕</span>
+    </span>
+  </footer>
+  <script src="main.js"></script>
+</body>
+</html>

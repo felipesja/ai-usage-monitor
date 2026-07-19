@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node / Tauri widget
+node_modules/
+widget/src-tauri/target/
+widget/src-tauri/gen/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Playwright MCP scratch
+.playwright-mcp/
+
+# Binários / executáveis
+*.exe
+
+# SO / editor
+.DS_Store
+Thumbs.db
+*.swp
