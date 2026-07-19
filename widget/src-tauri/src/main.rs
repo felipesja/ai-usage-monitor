@@ -9,126 +9,19 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 #[cfg(not(debug_assertions))]
 use tauri_plugin_autostart::ManagerExt;
 
-#[cfg(windows)]
-mod bridge {
-    //! Ponte WSL persistente criada diretamente com CREATE_NO_WINDOW. O uso de
-    //! WslLaunch parece mais nativo, mas as versões atuais do WSL implementam
-    //! essa API iniciando um wsl.exe com console próprio; quando a ponte fica
-    //! viva, o Windows Terminal também fica aberto. Criar o processo como filho
-    //! GUI, com stdio redirecionado e sem console, evita a janela por completo.
-    use std::io::{self, BufRead, BufReader, Write};
-    use std::os::windows::process::CommandExt;
-    use std::process::{Child, Command, Stdio};
-    use std::sync::Mutex;
+mod collector;
 
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const DISTRO: &str = "Ubuntu";
-    const BRIDGE_CMD: &str = "exec \"$HOME/.local/bin/ai-usage\" bridge";
-
-    fn log_bridge(message: &str) {
-        let path = std::env::temp_dir().join("ai-usage-widget.log");
-        let line = format!("{message}\n");
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
-    }
-
-    struct Bridge {
-        child: Child,
-        stdin: Box<dyn Write + Send>,
-        reader: Box<dyn BufRead + Send>,
-    }
-
-    impl Bridge {
-        fn kill(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-
-    static BRIDGE: Mutex<Option<Bridge>> = Mutex::new(None);
-
-    fn spawn_bridge() -> io::Result<Bridge> {
-        log_bridge("criando ponte wsl.exe oculta com CREATE_NO_WINDOW");
-        let mut child = Command::new("wsl.exe")
-            .args(["-d", DISTRO, "--", "bash", "-lc", BRIDGE_CMD])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()?;
-        let stdin = child.stdin.take().expect("stdin da ponte ausente");
-        let stdout = child.stdout.take().expect("stdout da ponte ausente");
-        Ok(Bridge {
-            child,
-            stdin: Box::new(stdin),
-            reader: Box::new(BufReader::new(stdout)),
-        })
-    }
-
-    pub fn fetch() -> Result<String, String> {
-        let mut guard = BRIDGE.lock().map_err(|_| "ponte ocupada")?;
-        for _ in 0..2 {
-            if guard.is_none() {
-                *guard = Some(spawn_bridge().map_err(|err| err.to_string())?);
-            }
-            let bridge = guard.as_mut().expect("ponte recém-criada");
-            let sent = bridge.stdin.write_all(b"\n").is_ok() && bridge.stdin.flush().is_ok();
-            if sent {
-                // Shells de login podem ecoar lixo antes do JSON; pula até 5
-                // linhas procurando a resposta (que sempre começa com '[').
-                let mut skipped = 0;
-                loop {
-                    let mut line = String::new();
-                    match bridge.reader.read_line(&mut line) {
-                        Ok(n) if n > 0 => {
-                            if line.trim_start().starts_with('[') {
-                                return Ok(line);
-                            }
-                            skipped += 1;
-                            if skipped >= 5 {
-                                break;
-                            }
-                        }
-                        _ => break,
-                    }
-                }
-            }
-            // Ponte morta ou resposta inválida: derruba e tenta com uma nova.
-            log_bridge("ponte WSL respondeu inválido — recriando");
-            bridge.kill();
-            *guard = None;
-        }
-        Err("ponte WSL indisponível".into())
-    }
-
-    /// O wsl.exe filho não morre quando o app sai; precisa de kill explícito.
-    pub fn shutdown() {
-        if let Ok(mut guard) = BRIDGE.lock() {
-            if let Some(mut bridge) = guard.take() {
-                bridge.kill();
-            }
-        }
-    }
-}
-
-/// Pede uma leitura de `ai-usage once --json` à ponte e devolve o JSON cru.
-/// Async: comandos síncronos rodam na thread principal do Tauri e
-/// congelariam a UI (e as animações) durante o fetch.
+/// Coleta os limites nativamente (sem ponte WSL) e devolve o JSON que o
+/// frontend renderiza. Async + spawn_blocking: a coleta faz I/O de rede e
+/// congelaria a UI (e as animações) se rodasse na thread principal do Tauri.
 #[tauri::command]
 async fn fetch_usage() -> Result<String, String> {
-    #[cfg(windows)]
-    {
-        tauri::async_runtime::spawn_blocking(bridge::fetch)
-            .await
-            .map_err(|err| err.to_string())?
-    }
-    #[cfg(not(windows))]
-    {
-        Err("disponível apenas no Windows".into())
-    }
+    tauri::async_runtime::spawn_blocking(|| {
+        let providers = collector::collect_all();
+        serde_json::to_string(&providers).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 const MARGIN: i32 = 12;
@@ -246,6 +139,17 @@ fn on_tray_event(app: &AppHandle, event: TrayIconEvent) {
 }
 
 fn main() {
+    // `ai-usage-widget --probe` imprime a coleta em JSON e sai, sem subir a
+    // janela. Serve para diagnosticar o coletor sem depender da GUI.
+    if std::env::args().any(|arg| arg == "--probe") {
+        let providers = collector::collect_all();
+        match serde_json::to_string_pretty(&providers) {
+            Ok(json) => println!("{json}"),
+            Err(err) => eprintln!("erro ao serializar: {err}"),
+        }
+        return;
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
@@ -294,8 +198,6 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
                     if event.id().as_ref() == "quit" {
-                        #[cfg(windows)]
-                        bridge::shutdown();
                         app.exit(0);
                     }
                 })
