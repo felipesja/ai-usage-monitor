@@ -7,7 +7,6 @@ import argparse
 import base64
 import calendar
 import concurrent.futures
-import curses
 import datetime as dt
 import getpass
 import json
@@ -25,6 +24,13 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+try:
+    import curses
+except ModuleNotFoundError:
+    # O Python do Windows não traz curses. Só o TUI (`watch`) depende dele;
+    # os demais comandos — inclusive o setup das credenciais — seguem valendo.
+    curses = None  # type: ignore[assignment]
 
 
 APP = "ai-usage-monitor"
@@ -861,6 +867,14 @@ def cursor_cookie() -> None:
     value = value.removeprefix("WorkosCursorSessionToken=")
     if not value:
         raise RuntimeError("cookie vazio")
+    # Colar em prompt oculto falha silenciosamente em alguns consoles (o valor
+    # chega truncado). Sem esta checagem, o erro só apareceria depois, como um
+    # HTTP 400 opaco na coleta.
+    if len(value) < 100 or not ("%3A%3A" in value or "::" in value):
+        raise RuntimeError(
+            "o cookie não parece um WorkosCursorSessionToken completo "
+            f"(recebidos {len(value)} caracteres); verifique se a colagem funcionou"
+        )
     write_private_json(CURSOR_CONFIG, {"method": "dashboard_cookie", "session_cookie": value})
     print(f"Sessão do Cursor salva em {CURSOR_CONFIG}")
 
@@ -929,6 +943,8 @@ def main() -> int:
                 results = collect_all()
                 print(json.dumps([asdict(item) for item in results], separators=(",", ":")), flush=True)
         else:
+            if curses is None:
+                raise RuntimeError("o TUI precisa do módulo curses, ausente neste Python; use 'once' ou o widget")
             curses.wrapper(tui, getattr(args, "interval", 60), getattr(args, "alert", 80))
         return 0
     except (OSError, RuntimeError, ValueError) as exc:
