@@ -9,11 +9,17 @@ mod codex;
 mod cursor;
 mod date;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
+
+/// The 5h quota window, also the horizon for trusting a `.claude.json` mtime.
+const CLAUDE_SESSION_SECONDS: u64 = 5 * 3600;
+/// Environments whose configs are this close apart are both taken as in use.
+const CLAUDE_CONFIG_TIE_SECONDS: u64 = 600;
 
 #[derive(Serialize, Clone)]
 pub struct Meter {
@@ -115,30 +121,186 @@ fn claude_profiles() -> Vec<PathBuf> {
     out
 }
 
-/// Provisional standby (phase 1): reads the active email from the Claude Code
-/// CLI, like Python does. Phase 4 replaces this with detection via usage delta
-/// between reads.
+/// Flag the Claude accounts that are not the one in use.
+///
+/// Primary signal: the account the Claude Code CLI is logged into, read from the
+/// most recently touched `.claude.json` across environments. A single copy of
+/// that file is not enough — Windows and WSL keep separate ones, and looking at
+/// only the local side leaves the account of the *other* side wrongly unflagged.
+/// When no `.claude.json` names a known account (usage driven from claude.ai or
+/// the desktop app), fall back to the session window: an account whose 5h window
+/// already rolled over cannot be the one burning quota. If nothing distinguishes
+/// the accounts, nothing is flagged. Mirrors `mark_standby` in
+/// `cli/usage_monitor.py`.
 fn mark_standby(providers: &mut [Provider]) {
-    if providers.iter().filter(|p| p.name == "Claude").count() < 2 {
+    let claude: Vec<&Provider> = providers
+        .iter()
+        .filter(|p| p.name == "Claude" && p.error.is_none())
+        .collect();
+    if claude.len() < 2 {
         return;
     }
-    let active = active_claude_email();
-    if active.is_empty() {
+    let emails = active_claude_emails();
+    let mut in_use: HashSet<String> = claude
+        .iter()
+        .filter(|p| emails.contains(&p.email.to_lowercase()))
+        .map(|p| p.account.clone())
+        .collect();
+    if in_use.is_empty() {
+        in_use = claude
+            .iter()
+            .filter(|p| session_active(p))
+            .map(|p| p.account.clone())
+            .collect();
+    }
+    if in_use.is_empty() || in_use.len() == claude.len() {
         return;
     }
-    for provider in providers.iter_mut().filter(|p| p.name == "Claude") {
-        provider.standby = provider.email.to_lowercase() != active;
+    for provider in providers
+        .iter_mut()
+        .filter(|p| p.name == "Claude" && p.error.is_none())
+    {
+        provider.standby = !in_use.contains(&provider.account);
     }
 }
 
-fn active_claude_email() -> String {
-    config::read_json(&config::claude_active_file())
-        .ok()
-        .and_then(|data| {
-            data.get("oauthAccount")
-                .and_then(|account| account.get("emailAddress"))
-                .and_then(|value| value.as_str())
-                .map(|email| email.to_lowercase())
-        })
-        .unwrap_or_default()
+/// Accounts the CLI is logged into right now, lowercased.
+///
+/// Each environment keeps its own `.claude.json`, so the file touched last is
+/// the one describing the session in use. Anything touched within
+/// `CLAUDE_CONFIG_TIE_SECONDS` of it counts too: with a CLI open on each side,
+/// both accounts really are burning quota, and without the tolerance the badge
+/// would bounce between them as one file or the other gets rewritten.
+/// The file is rewritten on every CLI run, so one untouched for longer than a
+/// session window says nothing about what is running now — it is dropped, and
+/// the caller falls back to the meters.
+fn active_claude_emails() -> HashSet<String> {
+    let mut found: Vec<(SystemTime, String)> = Vec::new();
+    for path in claude_config_paths() {
+        let Ok(stamp) = fs::metadata(&path).and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        // A clock skew that dates the file in the future counts as fresh.
+        if SystemTime::now()
+            .duration_since(stamp)
+            .is_ok_and(|age| age > Duration::from_secs(CLAUDE_SESSION_SECONDS))
+        {
+            continue;
+        }
+        let Ok(data) = config::read_json(&path) else { continue };
+        let email = data
+            .get("oauthAccount")
+            .and_then(|account| account.get("emailAddress"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if !email.is_empty() {
+            found.push((stamp, email.to_lowercase()));
+        }
+    }
+    let Some(newest) = found.iter().map(|(stamp, _)| *stamp).max() else {
+        return HashSet::new();
+    };
+    let cutoff = newest
+        .checked_sub(Duration::from_secs(CLAUDE_CONFIG_TIE_SECONDS))
+        .unwrap_or(newest);
+    found
+        .into_iter()
+        .filter(|(stamp, _)| *stamp >= cutoff)
+        .map(|(_, email)| email)
+        .collect()
+}
+
+/// Every `.claude.json` the CLI may have written on this machine, on both sides
+/// of WSL — the answer has to be the same from Windows or Linux. macOS has no
+/// second side, so there the local file is the whole story.
+fn claude_config_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        paths.push(PathBuf::from(dir).join(".claude.json"));
+    }
+    paths.push(config::home().join(".claude.json"));
+    paths.extend(other_side_claude_configs());
+    paths
+}
+
+/// The CLI configs inside WSL, seen from Windows. Only *running* distros are
+/// listed: reaching into `\\wsl.localhost\<name>` of a stopped one would boot
+/// its VM on every refresh. `wsl.exe --list` reads the registry, boots nothing,
+/// and answers in ~200 ms.
+#[cfg(windows)]
+fn other_side_claude_configs() -> Vec<PathBuf> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let Ok(output) = std::process::Command::new("wsl.exe")
+        .args(["--list", "--running", "--quiet"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        return Vec::new();
+    };
+    // wsl.exe writes UTF-16LE.
+    let units: Vec<u16> = output
+        .stdout
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let listing = String::from_utf16_lossy(&units);
+
+    let mut paths = Vec::new();
+    for name in listing.lines().map(str::trim).filter(|name| !name.is_empty()) {
+        let root = PathBuf::from(format!(r"\\wsl.localhost\{name}"));
+        paths.push(root.join("root").join(".claude.json"));
+        if let Ok(entries) = fs::read_dir(root.join("home")) {
+            for entry in entries.flatten() {
+                paths.push(entry.path().join(".claude.json"));
+            }
+        }
+    }
+    paths
+}
+
+/// The CLI configs on the Windows profiles, seen from WSL through /mnt.
+#[cfg(target_os = "linux")]
+fn other_side_claude_configs() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let Ok(drives) = fs::read_dir("/mnt") else {
+        return paths;
+    };
+    for drive in drives.flatten() {
+        if let Ok(users) = fs::read_dir(drive.path().join("Users")) {
+            for user in users.flatten() {
+                paths.push(user.path().join(".claude.json"));
+            }
+        }
+    }
+    paths
+}
+
+/// macOS (and any other Unix): only the local config exists.
+#[cfg(not(any(windows, target_os = "linux")))]
+fn other_side_claude_configs() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Whether the account has a live 5h session window — i.e. it burned quota
+/// recently enough that the window has not rolled over yet.
+fn session_active(provider: &Provider) -> bool {
+    let Some(meter) = provider.meters.iter().find(|m| m.label == "Session") else {
+        return false;
+    };
+    if meter.percent.unwrap_or(0.0) <= 0.0 {
+        return false;
+    }
+    match meter.reset_at.as_deref().and_then(date::iso_to_epoch) {
+        Some(reset) => reset > now_epoch(),
+        None => true,
+    }
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
 }

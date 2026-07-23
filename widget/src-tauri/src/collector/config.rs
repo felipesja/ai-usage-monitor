@@ -27,12 +27,6 @@ pub fn cursor_config() -> PathBuf {
     config_dir().join("cursor.json")
 }
 
-/// The Claude Code CLI's `~/.claude.json` — used (temporarily) to know which
-/// account is active. Goes away once dynamic standby lands (phase 4).
-pub fn claude_active_file() -> PathBuf {
-    home().join(".claude.json")
-}
-
 pub fn read_json(path: &Path) -> Result<Value, String> {
     let text = fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
     serde_json::from_str(&text).map_err(|err| err.to_string())

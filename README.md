@@ -22,7 +22,7 @@ Native Tauri v2 app (`widget/`; WebView2 on Windows, WKWebView on macOS):
 - **Notifications**: a native notification when a limit crosses 80% — once on crossing, re-arming when usage drops back below the threshold.
 - **Start on login**: the autostart entry (registry Run entry on Windows, LaunchAgent on macOS) is enabled on the first run of a release build.
 
-Each provider uses its brand color (Claude coral, OpenAI green, Cursor white) and is identified by the account's real email. With more than one account on the same provider, the one **not** logged into the CLI gets a cyan `◉ STANDBY` marker. Limits show up as `Session` (5h window) and `Weekly` (7-day window).
+Each provider uses its brand color (Claude coral, OpenAI green, Cursor white) and is identified by the account's real email. With more than one Claude account, the ones **not in use** get a cyan `◉ STANDBY` marker — the account in use is the one the Claude Code CLI is logged into, detected across environments (Windows and WSL alike), falling back to the open 5h session window when no CLI login is found. Limits show up as `Session` (5h window) and `Weekly` (7-day window).
 
 Build and implementation details: [`widget/README.md`](widget/README.md).
 

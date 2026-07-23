@@ -42,6 +42,8 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLAUDE_SESSION_SECONDS = 5 * 3600  # the 5h quota window, also the standby horizon
+CLAUDE_CONFIG_TIE_SECONDS = 600  # environments this close apart are both in use
 
 
 @dataclass
@@ -495,23 +497,127 @@ def collect_cursor() -> Provider:
         return Provider("Cursor", "Business", error=str(exc))
 
 
-def claude_active_email() -> str:
+def session_active(provider: Provider) -> bool:
+    """Whether the account has a live 5h session window — i.e. it burned quota
+    recently enough that the window has not rolled over yet."""
+    meter = next((item for item in provider.meters if item.label == "Session"), None)
+    if meter is None or not meter.percent:
+        return False
+    if not meter.reset_at:
+        return True
     try:
-        data = read_json(Path.home() / ".claude.json")
-        return str((data.get("oauthAccount") or {}).get("emailAddress") or "")
+        moment = dt.datetime.fromisoformat(meter.reset_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return moment > dt.datetime.now(dt.timezone.utc)
+
+
+def wsl_claude_configs() -> list[Path]:
+    """The CLI configs inside WSL, seen from Windows.
+
+    Only *running* distros are listed: reaching into `\\\\wsl.localhost\\<name>`
+    of a stopped one would boot its VM on every refresh. `wsl.exe --list` reads
+    the registry, boots nothing, and answers in ~200 ms.
+    """
+    try:
+        proc = subprocess.run(
+            ["wsl.exe", "--list", "--running", "--quiet"],
+            capture_output=True,
+            timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
     except Exception:
-        return ""
+        return []
+    # wsl.exe writes UTF-16LE.
+    names = [line.strip() for line in proc.stdout.decode("utf-16-le", "ignore").splitlines()]
+    paths: list[Path] = []
+    for name in filter(None, names):
+        root = Path(f"\\\\wsl.localhost\\{name}")
+        paths.append(root / "root" / ".claude.json")
+        try:
+            paths.extend(sorted((root / "home").glob("*/.claude.json")))
+        except OSError:
+            pass
+    return paths
+
+
+def windows_claude_configs() -> list[Path]:
+    """The CLI configs on the Windows profiles, seen from WSL through /mnt."""
+    try:
+        return sorted(Path("/mnt").glob("*/Users/*/.claude.json")) if Path("/mnt").is_dir() else []
+    except OSError:
+        return []
+
+
+def claude_config_paths() -> list[Path]:
+    """Every `.claude.json` the Claude Code CLI may have written on this machine,
+    on both sides of WSL — the answer has to be the same from Windows or Linux.
+    macOS has no second side, so there the local file is the whole story."""
+    paths = []
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    if override:
+        paths.append(Path(override) / ".claude.json")
+    paths.append(Path.home() / ".claude.json")
+    if os.name == "nt":
+        paths.extend(wsl_claude_configs())
+    elif sys.platform.startswith("linux"):
+        paths.extend(windows_claude_configs())
+    return paths
+
+
+def claude_active_emails() -> set[str]:
+    """Accounts the CLI is logged into right now, lowercased.
+
+    Each environment keeps its own `.claude.json`, so the file touched last is
+    the one describing the session in use. Anything touched within
+    `CLAUDE_CONFIG_TIE_SECONDS` of it counts too: with a CLI open on each side,
+    both accounts really are burning quota, and without the tolerance the badge
+    would bounce between them as one file or the other gets rewritten.
+    The file is rewritten on every CLI run, so one untouched for longer than a
+    session window says nothing about what is running now — it is dropped, and
+    the caller falls back to the meters.
+    """
+    stale = time.time() - CLAUDE_SESSION_SECONDS
+    found: list[tuple[float, str]] = []
+    for path in claude_config_paths():
+        try:
+            stamp = path.stat().st_mtime
+            if stamp < stale:
+                continue
+            email = str((read_json(path).get("oauthAccount") or {}).get("emailAddress") or "")
+        except Exception:
+            continue
+        if email:
+            found.append((stamp, email.lower()))
+    if not found:
+        return set()
+    newest = max(stamp for stamp, _ in found)
+    return {email for stamp, email in found if stamp >= newest - CLAUDE_CONFIG_TIE_SECONDS}
 
 
 def mark_standby(results: list[Provider]) -> None:
-    claude = [item for item in results if item.name == "Claude"]
+    """Flag the Claude accounts that are not the one in use.
+
+    Primary signal: the account the CLI is logged into, read from the most
+    recently touched `.claude.json` across environments. A single copy of that
+    file is not enough — Windows and WSL keep separate ones, and looking at only
+    the local side leaves the account of the *other* side wrongly unflagged.
+    When no `.claude.json` names a known account (usage driven from claude.ai or
+    the desktop app), fall back to the session window: an account whose 5h
+    window already rolled over cannot be the one burning quota. If nothing
+    distinguishes the accounts, nothing is flagged.
+    """
+    claude = [item for item in results if item.name == "Claude" and item.error is None]
     if len(claude) < 2:
         return
-    email = claude_active_email().lower()
-    if not email:
+    active_emails = claude_active_emails()
+    in_use = {item.account for item in claude if item.email.lower() in active_emails}
+    if not in_use:
+        in_use = {item.account for item in claude if session_active(item)}
+    if not in_use or len(in_use) == len(claude):
         return
     for item in claude:
-        item.standby = item.email.lower() != email
+        item.standby = item.account not in in_use
 
 
 def collect_all() -> list[Provider]:

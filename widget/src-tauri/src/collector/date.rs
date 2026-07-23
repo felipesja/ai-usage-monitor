@@ -21,6 +21,58 @@ pub fn next_month_iso(epoch_ms: f64) -> String {
     iso(next_year, next_month, day, secs / 3600, (secs % 3600) / 60, secs % 60)
 }
 
+/// ISO-8601 → epoch seconds. Accepts the shapes the providers actually emit:
+/// `YYYY-MM-DDTHH:MM:SS`, with optional fractional seconds and an optional
+/// `Z` / `±HH:MM` / `±HHMM` offset (absent means UTC). Returns `None` on
+/// anything it does not recognize, so callers can decide the fallback.
+pub fn iso_to_epoch(text: &str) -> Option<i64> {
+    let (date, rest) = text.split_once(['T', 't', ' '])?;
+    let mut parts = date.splitn(3, '-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+
+    let (clock, offset) = match rest.find(['Z', 'z', '+', '-']) {
+        Some(index) => rest.split_at(index),
+        None => (rest, ""),
+    };
+    let clock = clock.split('.').next()?;
+    let mut units = clock.splitn(3, ':');
+    let hour: i64 = units.next()?.parse().ok()?;
+    let minute: i64 = units.next()?.parse().ok()?;
+    let second: i64 = units.next().unwrap_or("0").parse().ok()?;
+
+    let seconds = days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second;
+    Some(seconds - offset_seconds(offset)?)
+}
+
+fn offset_seconds(offset: &str) -> Option<i64> {
+    let sign = match offset.as_bytes().first() {
+        None | Some(b'Z') | Some(b'z') => return Some(0),
+        Some(b'+') => 1,
+        Some(b'-') => -1,
+        _ => return None,
+    };
+    let digits: String = offset[1..].chars().filter(char::is_ascii_digit).collect();
+    let (hours, minutes) = match digits.len() {
+        2 => (digits.parse::<i64>().ok()?, 0),
+        4 => (digits[..2].parse::<i64>().ok()?, digits[2..].parse::<i64>().ok()?),
+        _ => return None,
+    };
+    Some(sign * (hours * 3600 + minutes * 60))
+}
+
+/// (year, month, day) → days since 1970-01-01. Inverse of `civil_from_days`.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 fn iso(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}+00:00")
 }
@@ -36,6 +88,35 @@ fn days_in_month(year: i64, month: i64) -> i64 {
 
 fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::iso_to_epoch;
+
+    #[test]
+    fn parses_the_shapes_the_providers_emit() {
+        // Claude: fractional seconds and an explicit +00:00.
+        assert_eq!(iso_to_epoch("2026-07-21T17:20:00.179248+00:00"), Some(1_784_654_400));
+        // Cursor: milliseconds and a Z suffix.
+        assert_eq!(iso_to_epoch("2026-08-13T15:15:26.000Z"), Some(1_786_634_126));
+        // Bare local-looking timestamp is read as UTC.
+        assert_eq!(iso_to_epoch("2026-07-21T17:20:00"), Some(1_784_654_400));
+        // Non-zero offsets shift back to UTC.
+        assert_eq!(iso_to_epoch("2026-07-21T14:20:00-03:00"), Some(1_784_654_400));
+        assert_eq!(iso_to_epoch("2026-07-21T20:20:00+0300"), Some(1_784_654_400));
+        // Epoch itself, and a leap day.
+        assert_eq!(iso_to_epoch("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(iso_to_epoch("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(iso_to_epoch(""), None);
+        assert_eq!(iso_to_epoch("2026-07-21"), None);
+        assert_eq!(iso_to_epoch("not a date"), None);
+        assert_eq!(iso_to_epoch("2026-07-21T17:20:00+bogus"), None);
+    }
 }
 
 /// Days since 1970-01-01 → (year, month, day).

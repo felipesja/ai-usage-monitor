@@ -76,8 +76,8 @@ function render(providers) {
     name.className = `provider-name ${provider.name}`;
     name.textContent = provider.name;
     nameRow.appendChild(name);
-    // With 2+ accounts on the same provider, the collector flags standby on
-    // the one not logged into the CLI — the unbadged one is currently active.
+    // With 2+ Claude accounts, the collector flags standby on the ones that are
+    // not logged into the CLI — the unbadged one is the account in use.
     if (provider.standby) {
       const badge = document.createElement("span");
       badge.className = "badge standby";
