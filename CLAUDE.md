@@ -20,7 +20,7 @@ There is no test suite, linter, or build for the Python script — it runs direc
 
 ### Tauri widget (`widget/`)
 
-The build **must run on the Windows filesystem** (cargo fails under `\\wsl.localhost`). It does not compile from WSL. Flow (PowerShell, in the synced Windows workspace):
+On **Windows**, the build must run on the Windows filesystem (cargo fails under `\\wsl.localhost`) — it does not compile from WSL. Flow (PowerShell, in the synced Windows workspace):
 
 ```powershell
 npm install
@@ -28,7 +28,9 @@ npm run dev      # dev
 npm run build    # release: .exe + NSIS installer in src-tauri\target\release\bundle\nsis\
 ```
 
-Icons: `npx tauri icon path\to\icon.png`.
+On **macOS**, the same `npm` flow builds natively (requires Xcode CLT, Rust, Node); `npm run build` produces the `.app` in `src-tauri/target/release/bundle/macos/` and a `.dmg` in `.../bundle/dmg/`.
+
+Icons: `npx tauri icon path/to/icon.png` (`icons/tray-macos.png`, the menu-bar template icon, is maintained by hand).
 
 ## Architecture
 
@@ -51,9 +53,10 @@ Registers the credentials that both collectors read, and renders the terminal da
 
 ### Tauri widget (`widget/`)
 
-Native Tauri v2 + WebView2 app (Windows) mirroring the TUI's compact mode.
+Native Tauri v2 app (Windows: WebView2; macOS: WKWebView) mirroring the TUI's compact mode.
 
-- **Native collector (`src-tauri/src/collector/`):** a Rust port of the Python collector — `claude.rs` (OAuth refresh + usage/profile), `codex.rs` (JSON-RPC against the `app-server`, via `codex.cmd` with `CREATE_NO_WINDOW`, falling back to the session cache), `cursor.rs` (admin_key/dashboard_cookie), `date.rs` (ISO-8601 without `chrono`), `config.rs` (store in `%USERPROFILE%\.config\ai-usage-monitor\`). It serializes exactly the same JSON as Python, so the frontend serves both. **There is no WSL bridge** — the app is self-contained. `--probe` prints the collection and exits, for diagnosis without the GUI.
+- **Native collector (`src-tauri/src/collector/`):** a Rust port of the Python collector — `claude.rs` (OAuth refresh + usage/profile), `codex.rs` (JSON-RPC against the `app-server`; on Windows via `codex.cmd` with `CREATE_NO_WINDOW`, on Unix via `find_codex()` mirroring Python's `codex_bin` because GUI apps get a minimal launchd PATH; falling back to the session cache), `cursor.rs` (admin_key/dashboard_cookie), `date.rs` (ISO-8601 without `chrono`), `config.rs` (store in `~/.config/ai-usage-monitor/`; 0600/0700 on Unix writes). It serializes exactly the same JSON as Python, so the frontend serves both. **There is no WSL bridge** — the app is self-contained. `--probe` prints the collection and exits, for diagnosis without the GUI.
+- **Per-platform config:** `tauri.conf.json` is shared; Tauri merges `tauri.windows.conf.json` (NSIS) or `tauri.macos.conf.json` (app/dmg, `macOSPrivateApi` for the transparent window) over it. macOS-specific behavior in `main.rs` is `cfg(target_os = "macos")`-gated: `ActivationPolicy::Accessory` (no Dock icon), visible-on-all-workspaces, template tray icon.
 - **Two implementations of the same contract:** when changing the shape of `Provider`/`Meter`, update the Python (`cli/usage_monitor.py`) and the Rust (`collector/mod.rs`) together. The same goes for user-visible meter labels and `details` strings, so both surfaces read alike.
 - **Frontend (`src/main.js`, `src/index.html`):** vanilla JS, no framework, `withGlobalTauri`. Replicates the TUI's logic (per-provider colors, alert hysteresis). Tauri commands: `fetch_usage` (async, otherwise it freezes the UI), `hide_to_tray`, `frontend_ready`.
 - **Window:** starts hidden (avoids the white flash), borderless, always-on-top, out of the taskbar, repositioned to the bottom-right corner on every show (no position persistence). Tray: left click toggles, right → Quit. Autostart and notifications only in release builds.

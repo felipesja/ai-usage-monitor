@@ -1,6 +1,6 @@
 # AI Usage Monitor
 
-Native desktop widget for **Windows** (Tauri) that pins the usage limits of multiple **Claude**, **Codex**, and **Cursor Business** accounts to the corner of your screen — always on top, out of the taskbar, and starting with Windows.
+Native desktop widget for **Windows and macOS** (Tauri) that pins the usage limits of multiple **Claude**, **Codex**, and **Cursor Business** accounts to the corner of your screen — always on top, out of the taskbar/Dock, and starting with the system.
 
 It began as a terminal dashboard (TUI) and grew into the native app, which is now the primary way to use it. The Python collector — no external dependencies — still handles credential setup and doubles as a standalone terminal dashboard.
 
@@ -12,15 +12,15 @@ It began as a terminal dashboard (TUI) and grew into the native app, which is no
 
 <p align="center"><em>Screenshots use sample account data; the usage figures are real.</em></p>
 
-## Desktop widget (Windows)
+## Desktop widget (Windows & macOS)
 
-Native Tauri v2 + WebView2 app (`widget/`):
+Native Tauri v2 app (`widget/`; WebView2 on Windows, WKWebView on macOS):
 
-- **Window**: borderless, always on top, out of the taskbar, pinned to the bottom-right corner. Starts hidden (no white flash) and is repositioned on every show.
-- **Tray**: boots with just the tray icon. Left click toggles the widget; right click → "Quit".
+- **Window**: borderless, always on top, out of the taskbar (Windows) / without a Dock icon and visible on every Space (macOS), pinned to the bottom-right corner. Starts hidden (no white flash) and is repositioned on every show.
+- **Tray**: boots with just the tray/menu-bar icon. Left click toggles the widget; right click → "Quit".
 - **Always fresh**: automatic background refresh with a spinner; `r` or the `↻` button force a refresh; `q`/`Esc`/`✕`/Alt+F4 hide to the tray.
-- **Notifications**: a native Windows toast when a limit crosses 80% — once on crossing, re-arming when usage drops back below the threshold.
-- **Start with Windows**: the autostart entry is enabled on the first run of a release build.
+- **Notifications**: a native notification when a limit crosses 80% — once on crossing, re-arming when usage drops back below the threshold.
+- **Start on login**: the autostart entry (registry Run entry on Windows, LaunchAgent on macOS) is enabled on the first run of a release build.
 
 Each provider uses its brand color (Claude coral, OpenAI green, Cursor white) and is identified by the account's real email. With more than one account on the same provider, the one **not** logged into the CLI gets a cyan `◉ STANDBY` marker. Limits show up as `Session` (5h window) and `Weekly` (7-day window).
 
@@ -31,20 +31,24 @@ Build and implementation details: [`widget/README.md`](widget/README.md).
 The widget is **self-contained**: collection runs in Rust inside the app itself — no WSL, no Python, no external processes.
 
 ```
-Tauri (Rust, Windows) → native collector → Claude, Codex, and Cursor APIs
+Tauri (Rust) → native collector → Claude, Codex, and Cursor APIs
 ```
 
-Credentials live in `%USERPROFILE%\.config\ai-usage-monitor\`, in the same format the Python collector uses — both read the same store. Since the limits are server-side, the numbers are identical no matter where the read happens.
+Credentials live in `~/.config/ai-usage-monitor/` (`%USERPROFILE%\.config\ai-usage-monitor\` on Windows), in the same format the Python collector uses — both read the same store. Since the limits are server-side, the numbers are identical no matter where the read happens.
 
 To diagnose collection without opening the window:
 
 ```powershell
-ai-usage-widget.exe --probe   # prints the collected JSON and exits
+ai-usage-widget.exe --probe   # Windows: prints the collected JSON and exits
+```
+
+```bash
+"/Applications/AI Usage Widget.app/Contents/MacOS/ai-usage-widget" --probe   # macOS
 ```
 
 ## Terminal dashboard (optional)
 
-The Python collector (`cli/usage_monitor.py`) runs straight in the terminal, on Linux/WSL or Windows, and is also what registers the credentials:
+The Python collector (`cli/usage_monitor.py`) runs straight in the terminal, on macOS, Linux/WSL, or Windows, and is also what registers the credentials:
 
 ```bash
 ai-usage doctor   # check the configuration
