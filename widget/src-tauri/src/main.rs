@@ -40,8 +40,11 @@ fn apply_position(window: &WebviewWindow) -> tauri::Result<()> {
     if let Some(monitor) = window.current_monitor()? {
         let area = monitor.work_area();
         let size = window.outer_size()?;
-        let x = area.position.x + area.size.width as i32 - size.width as i32 - MARGIN;
-        let y = area.position.y + area.size.height as i32 - size.height as i32 - MARGIN;
+        // The work area is in physical pixels; scale the margin so it reads as
+        // 12 logical px regardless of DPI (e.g. Retina's 2x).
+        let margin = (MARGIN as f64 * monitor.scale_factor()).round() as i32;
+        let x = area.position.x + area.size.width as i32 - size.width as i32 - margin;
+        let y = area.position.y + area.size.height as i32 - size.height as i32 - margin;
         window.set_position(tauri::PhysicalPosition::new(x, y))?;
     }
     Ok(())

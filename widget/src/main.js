@@ -191,8 +191,17 @@ document.addEventListener("keydown", (event) => {
 });
 
 // The window starts hidden. Waiting one frame guarantees the WebView has
-// composited the content before a tray click can show it.
-requestAnimationFrame(() => invoke("frontend_ready").catch(console.error));
+// composited the content before a tray click can show it. macOS (WKWebView)
+// suspends requestAnimationFrame while the window is hidden, so a timer
+// backs it up — the ready signal must not depend on ever being composited.
+let readySent = false;
+function sendReady() {
+  if (readySent) return;
+  readySent = true;
+  invoke("frontend_ready").catch(console.error);
+}
+requestAnimationFrame(sendReady);
+setTimeout(sendReady, 250);
 
 document.getElementById("autorefresh").textContent = `auto-refresh every ${INTERVAL_MS / 1000}s`;
 
