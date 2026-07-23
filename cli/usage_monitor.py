@@ -592,7 +592,7 @@ def session_active(provider: Provider) -> bool:
     return moment > dt.datetime.now(dt.timezone.utc)
 
 
-def wsl_claude_configs() -> list[Path]:
+def wsl_claude_configs() -> list[tuple[Path, Path]]:
     """The CLI configs inside WSL, seen from Windows.
 
     Only *running* distros are listed: reaching into `\\\\wsl.localhost\\<name>`
@@ -613,81 +613,98 @@ def wsl_claude_configs() -> list[Path]:
     paths: list[Path] = []
     for name in filter(None, names):
         root = Path(f"\\\\wsl.localhost\\{name}")
-        paths.append(root / "root" / ".claude.json")
+        paths.append(default_claude_source(root / "root"))
         paths.extend(custom_dir_claude_configs(root / "root"))
         try:
             for home in sorted((root / "home").iterdir()):
-                paths.append(home / ".claude.json")
+                paths.append(default_claude_source(home))
                 paths.extend(custom_dir_claude_configs(home))
         except OSError:
             pass
     return paths
 
 
-def windows_claude_configs() -> list[Path]:
+def windows_claude_configs() -> list[tuple[Path, Path]]:
     """The CLI configs on the Windows profiles, seen from WSL through /mnt."""
     if not Path("/mnt").is_dir():
         return []
     try:
         paths = []
         for home in sorted(Path("/mnt").glob("*/Users/*")):
-            paths.append(home / ".claude.json")
+            paths.append(default_claude_source(home))
             paths.extend(custom_dir_claude_configs(home))
         return paths
     except OSError:
         return []
 
 
-def custom_dir_claude_configs(base: Path) -> list[Path]:
-    """`.claude.json` inside each `.claude*` dir under `base`.
+def default_claude_source(home: Path) -> tuple[Path, Path]:
+    """The default layout: `.claude.json` next to the `~/.claude` dir."""
+    return (home / ".claude.json", home / ".claude" / "history.jsonl")
 
-    A CLI running with a custom `CLAUDE_CONFIG_DIR` keeps its copy *inside*
-    that dir (the default lives next to `~/.claude`, not in it) — the
+
+def custom_dir_claude_configs(base: Path) -> list[tuple[Path, Path]]:
+    """(config, history) inside each `.claude*` dir under `base`.
+
+    A CLI running with a custom `CLAUDE_CONFIG_DIR` keeps both files *inside*
+    that dir (the default layout keeps them next to `~/.claude` / in it) — the
     `~/.claude*` naming is the discoverable convention for those setups.
     """
     try:
-        return sorted(p / ".claude.json" for p in base.glob(".claude*") if p.is_dir())
+        return sorted(
+            (p / ".claude.json", p / "history.jsonl") for p in base.glob(".claude*") if p.is_dir()
+        )
     except OSError:
         return []
 
 
-def claude_config_paths() -> list[Path]:
-    """Every `.claude.json` the Claude Code CLI may have written on this machine,
-    on both sides of WSL — the answer has to be the same from Windows or Linux.
-    macOS has no second side, so there the local files are the whole story."""
-    paths = []
+def claude_config_sources() -> list[tuple[Path, Path]]:
+    """Every (`.claude.json`, `history.jsonl`) pair the Claude Code CLI may have
+    written on this machine, on both sides of WSL — the answer has to be the
+    same from Windows or Linux; macOS has no second side. The config carries
+    the account, the history carries liveness (see `claude_active_emails`)."""
+    sources = []
     override = os.environ.get("CLAUDE_CONFIG_DIR")
     if override:
-        paths.append(Path(override) / ".claude.json")
-    paths.append(Path.home() / ".claude.json")
-    paths.extend(custom_dir_claude_configs(Path.home()))
+        sources.append((Path(override) / ".claude.json", Path(override) / "history.jsonl"))
+    sources.append(default_claude_source(Path.home()))
+    sources.extend(custom_dir_claude_configs(Path.home()))
     if os.name == "nt":
-        paths.extend(wsl_claude_configs())
+        sources.extend(wsl_claude_configs())
     elif sys.platform.startswith("linux"):
-        paths.extend(windows_claude_configs())
-    return list(dict.fromkeys(paths))
+        sources.extend(windows_claude_configs())
+    return list(dict.fromkeys(sources))
 
 
 def claude_active_emails() -> set[str]:
     """Accounts the CLI is logged into right now, lowercased.
 
-    Each environment keeps its own `.claude.json`, so the file touched last is
-    the one describing the session in use. Anything touched within
-    `CLAUDE_CONFIG_TIE_SECONDS` of it counts too: with a CLI open on each side,
-    both accounts really are burning quota, and without the tolerance the badge
-    would bounce between them as one file or the other gets rewritten.
-    The file is rewritten on every CLI run, so one untouched for longer than a
-    session window says nothing about what is running now — it is dropped, and
-    the caller falls back to the meters.
+    Each environment's freshness is the newest of its `.claude.json` (rewritten
+    on session events) and its `history.jsonl` (appended on every prompt) — the
+    config alone goes untouched during a long-running session, which would make
+    an actively working account look idle. The freshest environment names the
+    session in use; anything within `CLAUDE_CONFIG_TIE_SECONDS` of it counts
+    too: with a CLI working on each side, both accounts really are burning
+    quota, and without the tolerance the badge would bounce between them.
+    An environment untouched for longer than a session window says nothing
+    about what is running now — it is dropped, and the caller falls back to
+    the meters.
     """
     stale = time.time() - CLAUDE_SESSION_SECONDS
     found: list[tuple[float, str]] = []
-    for path in claude_config_paths():
+    for config, history in claude_config_sources():
         try:
-            stamp = path.stat().st_mtime
-            if stamp < stale:
-                continue
-            email = str((read_json(path).get("oauthAccount") or {}).get("emailAddress") or "")
+            stamp = config.stat().st_mtime
+        except OSError:
+            continue
+        try:
+            stamp = max(stamp, history.stat().st_mtime)
+        except OSError:
+            pass
+        if stamp < stale:
+            continue
+        try:
+            email = str((read_json(config).get("oauthAccount") or {}).get("emailAddress") or "")
         except Exception:
             continue
         if email:

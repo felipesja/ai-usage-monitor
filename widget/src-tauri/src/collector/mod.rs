@@ -172,20 +172,25 @@ fn mark_standby(providers: &mut [Provider]) {
 
 /// Accounts the CLI is logged into right now, lowercased.
 ///
-/// Each environment keeps its own `.claude.json`, so the file touched last is
-/// the one describing the session in use. Anything touched within
-/// `CLAUDE_CONFIG_TIE_SECONDS` of it counts too: with a CLI open on each side,
-/// both accounts really are burning quota, and without the tolerance the badge
-/// would bounce between them as one file or the other gets rewritten.
-/// The file is rewritten on every CLI run, so one untouched for longer than a
-/// session window says nothing about what is running now — it is dropped, and
-/// the caller falls back to the meters.
+/// Each environment's freshness is the newest of its `.claude.json` (rewritten
+/// on session events) and its `history.jsonl` (appended on every prompt) — the
+/// config alone goes untouched during a long-running session, which would make
+/// an actively working account look idle. The freshest environment names the
+/// session in use; anything within `CLAUDE_CONFIG_TIE_SECONDS` of it counts
+/// too: with a CLI working on each side, both accounts really are burning
+/// quota, and without the tolerance the badge would bounce between them.
+/// An environment untouched for longer than a session window says nothing
+/// about what is running now — it is dropped, and the caller falls back to
+/// the meters.
 fn active_claude_emails() -> HashSet<String> {
     let mut found: Vec<(SystemTime, String)> = Vec::new();
-    for path in claude_config_paths() {
-        let Ok(stamp) = fs::metadata(&path).and_then(|meta| meta.modified()) else {
+    for (config, history) in claude_config_sources() {
+        let Ok(mut stamp) = fs::metadata(&config).and_then(|meta| meta.modified()) else {
             continue;
         };
+        if let Ok(activity) = fs::metadata(&history).and_then(|meta| meta.modified()) {
+            stamp = stamp.max(activity);
+        }
         // A clock skew that dates the file in the future counts as fresh.
         if SystemTime::now()
             .duration_since(stamp)
@@ -193,7 +198,7 @@ fn active_claude_emails() -> HashSet<String> {
         {
             continue;
         }
-        let Ok(data) = config::read_json(&path) else { continue };
+        let Ok(data) = config::read_json(&config) else { continue };
         let email = data
             .get("oauthAccount")
             .and_then(|account| account.get("emailAddress"))
@@ -216,13 +221,22 @@ fn active_claude_emails() -> HashSet<String> {
         .collect()
 }
 
-/// `.claude.json` inside each `.claude*` dir under `base`.
+/// A (config, history) pair: `.claude.json` carries the account, the dir's
+/// `history.jsonl` carries liveness.
+type ClaudeSource = (PathBuf, PathBuf);
+
+/// The default layout: `.claude.json` next to the `~/.claude` dir.
+fn default_claude_source(home: &std::path::Path) -> ClaudeSource {
+    (home.join(".claude.json"), home.join(".claude").join("history.jsonl"))
+}
+
+/// (config, history) inside each `.claude*` dir under `base`.
 ///
-/// A CLI running with a custom `CLAUDE_CONFIG_DIR` keeps its copy *inside*
-/// that dir (the default lives next to `~/.claude`, not in it) — the
+/// A CLI running with a custom `CLAUDE_CONFIG_DIR` keeps both files *inside*
+/// that dir (the default layout keeps them next to `~/.claude` / in it) — the
 /// `~/.claude*` naming is the discoverable convention for those setups.
 /// Mirrors `custom_dir_claude_configs` in `usage_monitor.py`.
-fn custom_dir_claude_configs(base: &std::path::Path) -> Vec<PathBuf> {
+fn custom_dir_claude_configs(base: &std::path::Path) -> Vec<ClaudeSource> {
     let mut out = Vec::new();
     if let Ok(entries) = fs::read_dir(base) {
         for entry in entries.flatten() {
@@ -232,7 +246,7 @@ fn custom_dir_claude_configs(base: &std::path::Path) -> Vec<PathBuf> {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with(".claude"));
             if named_claude && path.is_dir() {
-                out.push(path.join(".claude.json"));
+                out.push((path.join(".claude.json"), path.join("history.jsonl")));
             }
         }
     }
@@ -240,20 +254,22 @@ fn custom_dir_claude_configs(base: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
-/// Every `.claude.json` the CLI may have written on this machine, on both sides
-/// of WSL — the answer has to be the same from Windows or Linux. macOS has no
-/// second side, so there the local files are the whole story.
-fn claude_config_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+/// Every (`.claude.json`, `history.jsonl`) pair the CLI may have written on
+/// this machine, on both sides of WSL — the answer has to be the same from
+/// Windows or Linux. macOS has no second side, so there the local sources are
+/// the whole story.
+fn claude_config_sources() -> Vec<ClaudeSource> {
+    let mut sources = Vec::new();
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        paths.push(PathBuf::from(dir).join(".claude.json"));
+        let dir = PathBuf::from(dir);
+        sources.push((dir.join(".claude.json"), dir.join("history.jsonl")));
     }
     let home = config::home();
-    paths.push(home.join(".claude.json"));
-    paths.extend(custom_dir_claude_configs(&home));
-    paths.extend(other_side_claude_configs());
-    paths.dedup();
-    paths
+    sources.push(default_claude_source(&home));
+    sources.extend(custom_dir_claude_configs(&home));
+    sources.extend(other_side_claude_configs());
+    sources.dedup();
+    sources
 }
 
 /// The CLI configs inside WSL, seen from Windows. Only *running* distros are
@@ -261,7 +277,7 @@ fn claude_config_paths() -> Vec<PathBuf> {
 /// its VM on every refresh. `wsl.exe --list` reads the registry, boots nothing,
 /// and answers in ~200 ms.
 #[cfg(windows)]
-fn other_side_claude_configs() -> Vec<PathBuf> {
+fn other_side_claude_configs() -> Vec<ClaudeSource> {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -283,11 +299,11 @@ fn other_side_claude_configs() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for name in listing.lines().map(str::trim).filter(|name| !name.is_empty()) {
         let root = PathBuf::from(format!(r"\\wsl.localhost\{name}"));
-        paths.push(root.join("root").join(".claude.json"));
+        paths.push(default_claude_source(&root.join("root")));
         paths.extend(custom_dir_claude_configs(&root.join("root")));
         if let Ok(entries) = fs::read_dir(root.join("home")) {
             for entry in entries.flatten() {
-                paths.push(entry.path().join(".claude.json"));
+                paths.push(default_claude_source(&entry.path()));
                 paths.extend(custom_dir_claude_configs(&entry.path()));
             }
         }
@@ -297,7 +313,7 @@ fn other_side_claude_configs() -> Vec<PathBuf> {
 
 /// The CLI configs on the Windows profiles, seen from WSL through /mnt.
 #[cfg(target_os = "linux")]
-fn other_side_claude_configs() -> Vec<PathBuf> {
+fn other_side_claude_configs() -> Vec<ClaudeSource> {
     let mut paths = Vec::new();
     let Ok(drives) = fs::read_dir("/mnt") else {
         return paths;
@@ -305,7 +321,7 @@ fn other_side_claude_configs() -> Vec<PathBuf> {
     for drive in drives.flatten() {
         if let Ok(users) = fs::read_dir(drive.path().join("Users")) {
             for user in users.flatten() {
-                paths.push(user.path().join(".claude.json"));
+                paths.push(default_claude_source(&user.path()));
                 paths.extend(custom_dir_claude_configs(&user.path()));
             }
         }
@@ -313,9 +329,9 @@ fn other_side_claude_configs() -> Vec<PathBuf> {
     paths
 }
 
-/// macOS (and any other Unix): only the local config exists.
+/// macOS (and any other Unix): only the local sources exist.
 #[cfg(not(any(windows, target_os = "linux")))]
-fn other_side_claude_configs() -> Vec<PathBuf> {
+fn other_side_claude_configs() -> Vec<ClaudeSource> {
     Vec::new()
 }
 
