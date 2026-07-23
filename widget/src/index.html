@@ -85,7 +85,8 @@
     body.show-accounts main#providers { display: none; }
     body.show-accounts #accounts { display: block; }
     .acct-section { margin-bottom: 16px; }
-    .acct-title { color: var(--cyan); font-weight: 700; margin-bottom: 4px; }
+    /* Section titles reuse .provider-name.<Name> for the brand colors. */
+    .acct-title { display: block; font-weight: 700; margin-bottom: 4px; }
     .acct-row { display: flex; gap: 8px; align-items: baseline; padding: 2px 0 2px 10px; }
     .acct-row .who { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .acct-row .meta { color: var(--muted); font-size: 10.5px; white-space: nowrap; }

@@ -187,8 +187,6 @@ function render(providers) {
   }
 }
 
-let refreshing = false;
-
 function setStatus(icon, text, fetching) {
   const status = document.getElementById("status");
   status.className = fetching ? "status fetching" : "status";
@@ -203,10 +201,20 @@ function setStatus(icon, text, fetching) {
 }
 
 let lastProviders = [];
+let refreshPromise = null;
 
-async function refresh() {
-  if (refreshing) return;
-  refreshing = true;
+// Concurrent callers share the in-flight run instead of skipping — callers
+// that await refresh() (the accounts view) need current data afterwards.
+function refresh() {
+  if (!refreshPromise) {
+    refreshPromise = doRefresh().finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
+}
+
+async function doRefresh() {
   setStatus("↻", "refreshing", true);
   try {
     const raw = await invoke("fetch_usage");
@@ -221,8 +229,6 @@ async function refresh() {
   } catch (error) {
     setStatus("!", "refresh failed", true);
     console.error(error);
-  } finally {
-    refreshing = false;
   }
 }
 
@@ -232,11 +238,16 @@ function accountsOpen() {
   return document.body.classList.contains("show-accounts");
 }
 
+// The message survives renderAccounts() rebuilding the view; it is cleared
+// when the view closes.
+let accountsMsg = { text: "", kind: "" };
+
 function setAccountsMsg(text, kind) {
+  accountsMsg = { text: text || "", kind: kind || "" };
   const msg = document.getElementById("acct-msg");
   if (!msg) return;
-  msg.textContent = text || "";
-  msg.className = `acct-msg${kind ? ` ${kind}` : ""}`;
+  msg.textContent = accountsMsg.text;
+  msg.className = `acct-msg${accountsMsg.kind ? ` ${accountsMsg.kind}` : ""}`;
 }
 
 function acctRow(...children) {
@@ -269,7 +280,7 @@ async function renderAccounts() {
   // ask for permission — and names the profile after the account's email.
   const claude = document.createElement("div");
   claude.className = "acct-section";
-  claude.appendChild(acctSpan("acct-title", "Claude"));
+  claude.appendChild(acctSpan("acct-title provider-name Claude", "Claude"));
   const registered = lastProviders.filter((p) => p.name === "Claude");
   for (const provider of registered) {
     const remove = acctSpan("acct-act rm", "✕ remove");
@@ -294,7 +305,18 @@ async function renderAccounts() {
   if (!registered.length) {
     claude.appendChild(acctSpan("acct-hint", "no profiles registered"));
   }
-  for (const candidate of detection.claude) {
+  // Hide sources whose logged-in account is already a registered profile;
+  // sources with unknown identity stay visible (Add dedupes them anyway).
+  const knownEmails = new Set(
+    registered.map((p) => (p.email || "").toLowerCase()).filter(Boolean),
+  );
+  const candidates = detection.claude.filter(
+    (c) => !c.email || !knownEmails.has(c.email.toLowerCase()),
+  );
+  if (!candidates.length) {
+    claude.appendChild(acctSpan("acct-hint", "no new accounts detected"));
+  }
+  for (const candidate of candidates) {
     const add = acctSpan("acct-act add", "+ add");
     add.addEventListener("click", async () => {
       add.classList.add("disabled");
@@ -323,7 +345,7 @@ async function renderAccounts() {
   // Codex needs no registration; report what the collector sees.
   const codex = document.createElement("div");
   codex.className = "acct-section";
-  codex.appendChild(acctSpan("acct-title", "Codex"));
+  codex.appendChild(acctSpan("acct-title provider-name Codex", "Codex"));
   const codexProvider = lastProviders.find((p) => p.name === "Codex");
   codex.appendChild(
     acctSpan(
@@ -338,7 +360,7 @@ async function renderAccounts() {
   // Cursor: no local credential to detect; manual key/cookie entry.
   const cursor = document.createElement("div");
   cursor.className = "acct-section";
-  cursor.appendChild(acctSpan("acct-title", "Cursor"));
+  cursor.appendChild(acctSpan("acct-title provider-name Cursor", "Cursor"));
   if (detection.cursor_configured) {
     const remove = acctSpan("acct-act rm", "✕ remove");
     remove.addEventListener("click", async () => {
@@ -399,7 +421,8 @@ async function renderAccounts() {
 
   const msg = document.createElement("div");
   msg.id = "acct-msg";
-  msg.className = "acct-msg";
+  msg.className = `acct-msg${accountsMsg.kind ? ` ${accountsMsg.kind}` : ""}`;
+  msg.textContent = accountsMsg.text;
   root.appendChild(msg);
 }
 
@@ -408,6 +431,7 @@ function toggleAccounts(open) {
   document.body.classList.toggle("show-accounts", show);
   document.getElementById("foothint").textContent = show ? "esc back" : "r refresh · a accounts · esc hide";
   if (show) renderAccounts();
+  else accountsMsg = { text: "", kind: "" };
 }
 
 document.getElementById("refresh").addEventListener("click", refresh);

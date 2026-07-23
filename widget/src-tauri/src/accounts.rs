@@ -17,6 +17,10 @@ use crate::collector::config::{claude_dir, cursor_config, home, read_json, write
 pub struct Candidate {
     pub id: String,
     pub label: String,
+    /// The account the source's config dir is logged into, when its
+    /// `.claude.json` metadata says so — lets the UI hide sources whose
+    /// account is already registered, without reading any secret.
+    pub email: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -28,21 +32,38 @@ pub struct Detection {
 /// Credential sources found on the machine. Listing is metadata-only — secrets
 /// are read on registration, which is when macOS asks the user for permission.
 pub fn detect() -> Detection {
+    #[cfg(target_os = "macos")]
+    let keychain = keychain_services();
+    #[cfg(not(target_os = "macos"))]
+    let keychain: Vec<String> = Vec::new();
+
     let mut claude_candidates = Vec::new();
     #[cfg(target_os = "macos")]
-    claude_candidates.extend(keychain_candidates());
-    claude_candidates.extend(file_candidates());
+    claude_candidates.extend(keychain_candidates(&keychain));
+    claude_candidates.extend(file_candidates(&keychain));
     Detection {
         claude: claude_candidates,
         cursor_configured: cursor_config().exists(),
     }
 }
 
-/// Keychain services named `Claude Code-credentials[-<hash>]` — one per Claude
-/// Code login: the default config dir, plus one per custom CLAUDE_CONFIG_DIR
-/// (suffixed with the first 8 hex chars of the dir path's sha256).
+/// The Keychain service name Claude Code uses for a config dir: the bare name
+/// for `~/.claude`, `-<first 8 hex of sha256(path)>` for a CLAUDE_CONFIG_DIR.
 #[cfg(target_os = "macos")]
-fn keychain_candidates() -> Vec<Candidate> {
+fn keychain_service_for(dir: &Path) -> String {
+    if dir == home().join(".claude") {
+        return "Claude Code-credentials".into();
+    }
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(dir.display().to_string().as_bytes());
+    let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("Claude Code-credentials-{}", &hash[..8])
+}
+
+/// Keychain services named `Claude Code-credentials[-<hash>]` — one per Claude
+/// Code login. `dump-keychain` lists metadata only (never secrets, no prompt).
+#[cfg(target_os = "macos")]
+fn keychain_services() -> Vec<String> {
     let Ok(output) = std::process::Command::new("security").arg("dump-keychain").output() else {
         return Vec::new();
     };
@@ -57,41 +78,98 @@ fn keychain_candidates() -> Vec<Candidate> {
     services.sort();
     services.dedup();
     services
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_candidates(services: &[String]) -> Vec<Candidate> {
+    // Reverse-map hash suffixes to ~/.claude* dirs so entries read as paths
+    // instead of hashes (unknown hashes — deleted or exotic config dirs —
+    // keep the raw suffix).
+    let by_service: std::collections::HashMap<String, (String, Option<String>)> = claude_dirs()
         .into_iter()
+        .map(|dir| {
+            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or(".claude").to_string();
+            (keychain_service_for(&dir), (name, dir_active_email(&dir)))
+        })
+        .collect();
+    services
+        .iter()
         .map(|service| {
-            let label = match service.strip_prefix("Claude Code-credentials-") {
-                Some(suffix) => format!("Keychain · {suffix}"),
-                None => "Keychain · default".to_string(),
+            let (label, email) = match by_service.get(service) {
+                Some((name, email)) => (format!("Keychain · ~/{name}"), email.clone()),
+                None => (
+                    match service.strip_prefix("Claude Code-credentials-") {
+                        Some(suffix) => format!("Keychain · {suffix}"),
+                        None => "Keychain · default".to_string(),
+                    },
+                    None,
+                ),
             };
-            Candidate { id: format!("keychain:{service}"), label }
+            Candidate { id: format!("keychain:{service}"), label, email }
         })
         .collect()
 }
 
 /// `~/.claude*/.credentials.json` files — the storage on Linux/Windows; on
-/// macOS usually stale copies, hence listed after the Keychain entries.
-fn file_candidates() -> Vec<Candidate> {
-    let home = home();
+/// macOS usually stale copies. A file whose config dir already has a Keychain
+/// entry is the same source seen twice — the Keychain wins, the file is
+/// hidden.
+fn file_candidates(keychain: &[String]) -> Vec<Candidate> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = keychain;
     let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(&home) else { return out };
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".claude"))
-                && path.join(".credentials.json").is_file()
-        })
-        .collect();
-    dirs.sort();
-    for dir in dirs {
+    for dir in claude_dirs() {
+        if !dir.join(".credentials.json").is_file() {
+            continue;
+        }
+        #[cfg(target_os = "macos")]
+        if keychain.contains(&keychain_service_for(&dir)) {
+            continue;
+        }
         let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or(".claude").to_string();
         out.push(Candidate {
             id: format!("file:{}", dir.join(".credentials.json").display()),
             label: format!("File · ~/{name}"),
+            email: dir_active_email(&dir),
         });
     }
+    out
+}
+
+/// The account a config dir is logged into, from its `.claude.json` (which
+/// sits inside a custom CLAUDE_CONFIG_DIR, but next to `~/.claude` for the
+/// default). Metadata only — no credential is touched.
+fn dir_active_email(dir: &Path) -> Option<String> {
+    let file = if *dir == home().join(".claude") {
+        home().join(".claude.json")
+    } else {
+        dir.join(".claude.json")
+    };
+    read_json(&file)
+        .ok()?
+        .get("oauthAccount")?
+        .get("emailAddress")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// `~/.claude*` directories, whether or not they hold a credential file (a
+/// Keychain-only config dir has none).
+fn claude_dirs() -> Vec<PathBuf> {
+    let home = home();
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(&home) else { return out };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let named_claude = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".claude"));
+        if named_claude && path.is_dir() {
+            out.push(path);
+        }
+    }
+    out.sort();
     out
 }
 
@@ -227,7 +305,13 @@ fn profiles() -> Vec<PathBuf> {
     if let Ok(entries) = fs::read_dir(claude_dir()) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.join(".credentials.json").is_file() {
+            // Skip dotted dirs — notably our own transient `.staging-<pid>`,
+            // which would otherwise dedupe every add against itself.
+            let hidden = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'));
+            if !hidden && path.join(".credentials.json").is_file() {
                 out.push(path);
             }
         }
