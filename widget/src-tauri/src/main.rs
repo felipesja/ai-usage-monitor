@@ -32,11 +32,58 @@ struct TrayState {
     pinned: bool,
     frontend_ready: bool,
     last_toggle: Option<Instant>,
+    /// Where the tray icon was last clicked (physical px). macOS anchors the
+    /// panel below it, like other menu bar widgets.
+    #[cfg(target_os = "macos")]
+    tray_click: Option<tauri::PhysicalPosition<f64>>,
 }
 
-/// Bottom-right corner of the work area. No position persistence: every show
+/// macOS: just below the menu bar, horizontally centered on the tray icon —
+/// the menu-bar-widget convention. Everywhere else (or before any tray click):
+/// bottom-right corner of the work area. No position persistence: every show
 /// repositions, even if the window was dragged elsewhere.
 fn apply_position(window: &WebviewWindow) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let click = {
+            let state = window.app_handle().state::<Mutex<TrayState>>();
+            let st = state.lock().expect("tray state poisoned");
+            st.tray_click
+        };
+        if let Some(click) = click {
+            // The monitor holding the clicked menu bar, not the hidden
+            // window's notion of "current". Containment test in physical px:
+            // `monitor_from_point` takes logical points on macOS, which would
+            // pick the wrong display for a physical click position.
+            let monitor = window
+                .app_handle()
+                .available_monitors()?
+                .into_iter()
+                .find(|m| {
+                    let pos = m.position();
+                    let size = m.size();
+                    click.x >= pos.x as f64
+                        && click.x < pos.x as f64 + size.width as f64
+                        && click.y >= pos.y as f64
+                        && click.y < pos.y as f64 + size.height as f64
+                })
+                .or(window.current_monitor()?);
+            if let Some(monitor) = monitor {
+                let area = monitor.work_area();
+                let size = window.outer_size()?;
+                let margin = (MARGIN as f64 * monitor.scale_factor()).round() as i32;
+                let gap = (6.0 * monitor.scale_factor()).round() as i32;
+                let x = (click.x as i32 - size.width as i32 / 2).clamp(
+                    area.position.x + margin,
+                    area.position.x + area.size.width as i32 - size.width as i32 - margin,
+                );
+                // The work area already excludes the menu bar.
+                let y = area.position.y + gap;
+                window.set_position(tauri::PhysicalPosition::new(x, y))?;
+                return Ok(());
+            }
+        }
+    }
     if let Some(monitor) = window.current_monitor()? {
         let area = monitor.work_area();
         let size = window.outer_size()?;
@@ -90,8 +137,11 @@ fn on_tray_event(app: &AppHandle, event: TrayIconEvent) {
         TrayIconEvent::Click {
             button: MouseButton::Left,
             button_state: MouseButtonState::Up,
+            position,
             ..
         } => {
+            #[cfg(not(target_os = "macos"))]
+            let _ = position;
             let Some(window) = app.get_webview_window("main") else {
                 return;
             };
@@ -105,6 +155,10 @@ fn on_tray_event(app: &AppHandle, event: TrayIconEvent) {
             let action = {
                 let state = app.state::<Mutex<TrayState>>();
                 let mut st = state.lock().expect("tray state poisoned");
+                #[cfg(target_os = "macos")]
+                {
+                    st.tray_click = Some(position);
+                }
                 let now = Instant::now();
                 // A double-click emits two Clicks; without debounce it flickers.
                 if st
