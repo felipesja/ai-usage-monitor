@@ -9,6 +9,7 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 #[cfg(not(debug_assertions))]
 use tauri_plugin_autostart::ManagerExt;
 
+mod accounts;
 mod collector;
 
 /// Collects the limits natively (no WSL bridge) and returns the JSON the
@@ -29,6 +30,44 @@ async fn fetch_usage() -> Result<String, String> {
 #[tauri::command]
 fn alert_thresholds() -> Vec<f64> {
     collector::config::alert_thresholds()
+}
+
+/// Credential sources present on the machine, for the Accounts view.
+/// spawn_blocking: `security dump-keychain` is a subprocess.
+#[tauri::command]
+async fn detect_accounts() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        serde_json::to_string(&accounts::detect()).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// Registers the Claude credential behind a detected source (may prompt for
+/// Keychain access and does network I/O to identify the account).
+#[tauri::command]
+async fn add_claude_account(source: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        accounts::add_claude(&source)
+            .and_then(|registered| serde_json::to_string(&registered).map_err(|err| err.to_string()))
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+fn remove_claude_account(profile: String) -> Result<(), String> {
+    accounts::remove_claude(&profile)
+}
+
+#[tauri::command]
+fn save_cursor_config(method: String, secret: String, email: String) -> Result<(), String> {
+    accounts::save_cursor(&method, &secret, &email)
+}
+
+#[tauri::command]
+fn remove_cursor_config() -> Result<(), String> {
+    accounts::remove_cursor()
 }
 
 const MARGIN: i32 = 12;
@@ -224,7 +263,12 @@ fn main() {
             fetch_usage,
             hide_to_tray,
             frontend_ready,
-            alert_thresholds
+            alert_thresholds,
+            detect_accounts,
+            add_claude_account,
+            remove_claude_account,
+            save_cursor_config,
+            remove_cursor_config
         ])
         .on_window_event(|window, event| {
             // Alt+F4 (and any close) becomes hide-to-tray.

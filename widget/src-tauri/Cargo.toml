@@ -18,9 +18,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 
-# PNG decoding for the template tray icon, macOS only.
+# PNG decoding for the template tray icon and sha2 for mapping Keychain entry
+# hashes back to config dirs, macOS only.
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "image-png"] }
+sha2 = "0.10"
 
 [profile.release]
 strip = true

@@ -2,7 +2,7 @@
 
 Native desktop widget for **Windows and macOS** (Tauri) that pins the usage limits of multiple **Claude**, **Codex**, and **Cursor Business** accounts to the corner of your screen — always on top, out of the taskbar/Dock, and starting with the system.
 
-It began as a terminal dashboard (TUI) and grew into the native app, which is now the primary way to use it. The Python collector — no external dependencies — still handles credential setup and doubles as a standalone terminal dashboard.
+It began as a terminal dashboard (TUI) and grew into the native app, which is now the primary way to use it. Accounts are added straight from the widget (which detects the credentials already on the machine); the Python collector — no external dependencies — offers the same setup from the terminal and doubles as a standalone dashboard.
 
 <p align="center">
   <img src="docs/widget.png" alt="AI Usage widget showing Claude, Codex, and Cursor limits" width="320">
@@ -81,6 +81,16 @@ Both the widget and the TUI notify as a limit rises through each level in
 Each level fires once and re-arms only after usage falls a few points below it, so a limit parked on a boundary is not re-announced every refresh. A window renewal drops usage to ~0, re-arming every level. Edit the list to change the levels (values outside 1–100 are ignored; an empty or unusable list falls back to the defaults). `ai-usage doctor` prints the levels in effect.
 
 ## Setting up accounts
+
+### In the widget
+
+Press `a` (or the `⚙` button) to open the accounts view:
+
+- **Claude**: the widget detects the logins already on the machine — macOS Keychain entries (one per Claude Code config dir, including custom `CLAUDE_CONFIG_DIR` setups) and `~/.claude*/.credentials.json` files — and registers one per click. Sources whose account is already registered are hidden; adding reads the credential (macOS asks for permission), identifies the account, and names the profile after its email.
+- **Codex**: nothing to set up — detected automatically through the Codex CLI.
+- **Cursor**: enter the Admin API key (plus your email) or the dashboard cookie directly in the form.
+
+The CLI commands below do the same from the terminal and remain the only path on headless setups.
 
 ### Two Claude accounts
 

@@ -4,7 +4,7 @@
 //! `asdict` so the frontend (`src/main.js`) consumes it unchanged.
 
 pub mod config;
-mod claude;
+pub mod claude;
 mod codex;
 mod cursor;
 mod date;
@@ -112,7 +112,13 @@ fn claude_profiles() -> Vec<PathBuf> {
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.join(".credentials.json").exists() {
+            // Skip dotted dirs — the accounts UI stages credentials in a
+            // transient `.staging-<pid>` that is not a profile.
+            let hidden = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'));
+            if !hidden && path.join(".credentials.json").exists() {
                 out.push(path);
             }
         }
