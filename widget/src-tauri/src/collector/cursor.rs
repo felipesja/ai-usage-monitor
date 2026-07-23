@@ -85,7 +85,8 @@ fn by_cookie(config: &Value) -> Result<Provider, String> {
     };
     let billing_end = data.get("billingCycleEnd").and_then(Value::as_str).map(str::to_string);
     let mut usage_meter = Meter::new("Usage", percent, billing_end.clone());
-    usage_meter.used = Some(display_number(raw_used / scale));
+    // Round up: a partially consumed unit still counts as used.
+    usage_meter.used = Some(display_number((raw_used / scale).ceil()));
     usage_meter.limit = Some(display_number(raw_limit / scale));
     provider.meters.push(usage_meter);
 

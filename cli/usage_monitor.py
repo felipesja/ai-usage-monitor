@@ -10,6 +10,7 @@ import concurrent.futures
 import datetime as dt
 import getpass
 import json
+import math
 import os
 import queue
 import re
@@ -444,7 +445,8 @@ def collect_cursor() -> Provider:
             # The team dashboard presents included-request units at 1/4 of the
             # internal values returned by usage-summary (576/2000 -> 144/500).
             request_scale = 4 if data.get("limitType") == "team" else 1
-            request_used = raw_used / request_scale
+            # Round up: a partially consumed unit still counts as used.
+            request_used = float(math.ceil(raw_used / request_scale))
             request_limit = raw_limit / request_scale
 
             def display_number(value: float) -> str:
