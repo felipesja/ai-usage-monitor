@@ -1,6 +1,7 @@
 //! Location and I/O for the credential store, mirroring the Python collector's
-//! layout: `%USERPROFILE%\.config\ai-usage-monitor\`. Python's 0600/0700
-//! permissions are a no-op on Windows; here we rely on the user profile's ACL.
+//! layout: `~/.config/ai-usage-monitor/`. On Unix, writes keep Python's
+//! 0600/0700 permissions (`ensure_private_dir`/`write_private_json`); on
+//! Windows they are a no-op and we rely on the user profile's ACL.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,7 +41,32 @@ pub fn read_json(path: &Path) -> Result<Value, String> {
 pub fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+        }
     }
     let text = serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
-    fs::write(path, text + "\n").map_err(|err| err.to_string())
+    #[cfg(unix)]
+    {
+        // 0600 from creation — no window where the credentials are readable.
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|err| format!("{}: {err}", path.display()))?;
+        file.write_all((text + "\n").as_bytes()).map_err(|err| err.to_string())?;
+        // `mode` only applies on create; tighten files the Python CLI made too.
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, text + "\n").map_err(|err| err.to_string())
+    }
 }
