@@ -173,26 +173,43 @@ fn main() {
             }
         })
         .setup(|app| {
-            // Start with Windows (a Run entry in the registry). Release only: in
-            // dev the exe is temporary and should not linger in the registry.
+            // Autostart on login (registry Run entry on Windows, LaunchAgent on
+            // macOS). Release only: in dev the exe is temporary and should not
+            // linger in the registry.
             #[cfg(not(debug_assertions))]
             let _ = app.autolaunch().enable();
+
+            // macOS: menu-bar utility without a Dock icon (`skipTaskbar` is a
+            // Windows/Linux concept).
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             app.manage(Mutex::new(TrayState::default()));
 
             // Position during setup for the first show (window starts hidden).
             let window = app.get_webview_window("main").expect("main window missing");
+            // macOS: widget convention — the panel follows the user to every
+            // Space instead of staying behind on the one where it was opened.
+            #[cfg(target_os = "macos")]
+            let _ = window.set_visible_on_all_workspaces(true);
             apply_position(&window)?;
 
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app).item(&quit).build()?;
-            TrayIconBuilder::with_id("tray")
-                .icon(
-                    app.default_window_icon()
-                        .expect("default icon missing")
-                        .clone(),
-                )
-                .tooltip("AI Usage")
+            let tray = TrayIconBuilder::with_id("tray").icon(
+                app.default_window_icon()
+                    .expect("default icon missing")
+                    .clone(),
+            );
+            // macOS: a template icon (monochrome + alpha) so the menu bar tints
+            // it to match light/dark appearance.
+            #[cfg(target_os = "macos")]
+            let tray = tray
+                .icon(tauri::image::Image::from_bytes(include_bytes!(
+                    "../icons/tray-macos.png"
+                ))?)
+                .icon_as_template(true);
+            tray.tooltip("AI Usage")
                 .menu(&menu)
                 // Without this, a left click opens the menu instead of toggling.
                 .show_menu_on_left_click(false)
