@@ -23,6 +23,17 @@ function meterColor(percent, providerName) {
   return ACCENT[providerName] || "var(--text)";
 }
 
+// macOS requires an explicit permission grant (UNUserNotificationCenter);
+// Windows happens to allow sending without one. Ask once, lazily, on the
+// first alert.
+async function notify(payload) {
+  let granted = await notification.isPermissionGranted();
+  if (!granted) {
+    granted = (await notification.requestPermission()) === "granted";
+  }
+  if (granted) notification.sendNotification(payload);
+}
+
 function checkAlerts(providers) {
   if (!ALERT_PERCENT) return;
   for (const provider of providers) {
@@ -39,7 +50,7 @@ function checkAlerts(providers) {
       if (alerted.has(key)) continue;
       alerted.add(key);
       const remaining = resetRemaining(meter.reset_at);
-      notification.sendNotification({
+      notify({
         title: `${provider.name} · ${provider.email || provider.account}`,
         body: `${meter.label} at ${Math.round(meter.percent)}%` + (remaining ? ` · renews in ${remaining}` : ""),
       });
