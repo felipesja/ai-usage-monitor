@@ -80,13 +80,57 @@ fn run(profile_dir: &Path, name: &str) -> Result<Provider, String> {
             }
         }
     }
-    if let Some(extra) = usage.get("extra_usage") {
-        if extra.get("is_enabled").and_then(Value::as_bool).unwrap_or(false) {
-            let used = extra.get("utilization").and_then(Value::as_f64).unwrap_or(0.0);
-            provider.details.push(format!("Extra usage: {used}%"));
-        }
+    if let Some(detail) = usage.get("extra_usage").and_then(extra_usage_detail) {
+        provider.details.push(detail);
     }
     Ok(provider)
+}
+
+/// One line describing the extra-usage credits, or `None` when there are none.
+///
+/// `utilization` only comes filled in when the account has a monthly cap — with
+/// pay-as-you-go credits it is null, so the amount spent (`used_credits`, in
+/// minor units) is the field that always carries meaning. Credits already spent
+/// keep showing after the account turns extra usage off (or has it capped),
+/// flagged with `off`. Mirrors `extra_usage_detail` in `usage_monitor.py`.
+fn extra_usage_detail(extra: &Value) -> Option<String> {
+    let used = extra.get("used_credits").and_then(Value::as_f64)?;
+    let enabled = extra.get("is_enabled").and_then(Value::as_bool).unwrap_or(false);
+    if !enabled && used <= 0.0 {
+        return None;
+    }
+    let places = extra.get("decimal_places").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let currency = extra.get("currency").and_then(Value::as_str).unwrap_or("");
+    let mut text = format!("Extra usage: {}", money(used, currency, places));
+    if let Some(limit) = extra
+        .get("monthly_limit")
+        .and_then(Value::as_f64)
+        .filter(|value| *value > 0.0)
+    {
+        let percent = extra
+            .get("utilization")
+            .and_then(Value::as_f64)
+            .unwrap_or(used / limit * 100.0);
+        text = format!("{text} / {} ({percent:.0}%)", money(limit, currency, places));
+    }
+    if !enabled {
+        text.push_str(" · off");
+    }
+    Some(text)
+}
+
+/// Minor units (`used_credits`, `monthly_limit`) as a readable amount.
+fn money(minor: f64, currency: &str, places: usize) -> String {
+    let symbol = match currency.to_uppercase().as_str() {
+        "USD" => "$".to_string(),
+        "BRL" => "R$".to_string(),
+        "EUR" => "€".to_string(),
+        "GBP" => "£".to_string(),
+        "" => String::new(),
+        other => format!("{other} "),
+    };
+    let value = minor / 10f64.powi(places as i32);
+    format!("{symbol}{value:.places$}")
 }
 
 /// Refreshes the access token if it expires in under 2 min; writes it back.

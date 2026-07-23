@@ -250,12 +250,48 @@ def collect_claude(profile_dir: Path) -> Provider:
             block = usage.get(key)
             if block:
                 result.meters.append(Meter(label, float(block.get("utilization", 0)), block.get("resets_at")))
-        extra = usage.get("extra_usage") or {}
-        if extra.get("is_enabled"):
-            result.details.append(f"Extra usage: {extra.get('utilization', 0)}%")
+        detail = extra_usage_detail(usage.get("extra_usage") or {})
+        if detail:
+            result.details.append(detail)
         return result
     except Exception as exc:
         return Provider("Claude", name, error=str(exc))
+
+
+CURRENCY_SYMBOLS = {"USD": "$", "BRL": "R$", "EUR": "€", "GBP": "£"}
+
+
+def money(minor: float, currency: str, places: int) -> str:
+    """Minor units (`used_credits`, `monthly_limit`) as a readable amount."""
+    symbol = CURRENCY_SYMBOLS.get(currency.upper()) or (f"{currency.upper()} " if currency else "")
+    return f"{symbol}{minor / (10 ** places):.{places}f}"
+
+
+def extra_usage_detail(extra: dict[str, Any]) -> str:
+    """One line describing the extra-usage credits, or "" when there are none.
+
+    `utilization` is only filled in when the account has a monthly cap — with
+    pay-as-you-go credits it comes back null, so the amount spent
+    (`used_credits`, in minor units) is the field that always carries meaning.
+    Credits already spent still show up after the account turns extra usage off
+    (or gets it capped), flagged with `off`.
+    """
+    used = extra.get("used_credits")
+    if used is None:
+        return ""
+    enabled = bool(extra.get("is_enabled"))
+    if not enabled and not used:
+        return ""
+    places = int(extra.get("decimal_places") or 0)
+    currency = str(extra.get("currency") or "")
+    text = f"Extra usage: {money(float(used), currency, places)}"
+    limit = extra.get("monthly_limit")
+    if limit:
+        percent = extra.get("utilization")
+        if percent is None:
+            percent = float(used) / float(limit) * 100
+        text += f" / {money(float(limit), currency, places)} ({float(percent):.0f}%)"
+    return text if enabled else f"{text} · off"
 
 
 def rpc_read(proc: subprocess.Popen[str], messages: queue.Queue[dict[str, Any]], wanted: int, timeout: float) -> dict[str, Any]:
