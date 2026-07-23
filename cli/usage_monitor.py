@@ -38,6 +38,14 @@ APP = "ai-usage-monitor"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP
 CLAUDE_DIR = CONFIG_DIR / "claude"
 CURSOR_CONFIG = CONFIG_DIR / "cursor.json"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+# Percentages at which a limit fires a notification, each level once as usage
+# rises through it. Editable in config.json ("alert_thresholds").
+DEFAULT_ALERT_THRESHOLDS = [80, 90, 95, 98, 100]
+# A level only re-arms once usage falls this many points below it, so a meter
+# hovering on a boundary (e.g. Codex jittering around 80%) does not re-notify
+# every refresh. A real reset drops usage to ~0, far past this margin.
+ALERT_REARM_MARGIN = 5
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
@@ -87,6 +95,42 @@ def write_private_json(path: Path, value: dict[str, Any]) -> None:
 
 def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def normalize_thresholds(values: Any) -> list[int]:
+    """Sanitize a thresholds list: ints in 1..100, unique, ascending.
+
+    Falls back to the defaults when the value is missing or unusable, so a
+    hand-edited config that goes wrong still notifies instead of going silent.
+    """
+    if not isinstance(values, list):
+        return list(DEFAULT_ALERT_THRESHOLDS)
+    cleaned = set()
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        level = round(value)
+        if 1 <= level <= 100:
+            cleaned.add(level)
+    return sorted(cleaned) if cleaned else list(DEFAULT_ALERT_THRESHOLDS)
+
+
+def load_alert_thresholds() -> list[int]:
+    """Notification levels from config.json, or the defaults if absent/broken."""
+    try:
+        return normalize_thresholds(read_json(CONFIG_FILE).get("alert_thresholds"))
+    except (OSError, ValueError):
+        return list(DEFAULT_ALERT_THRESHOLDS)
+
+
+def ensure_config_file() -> None:
+    """Write config.json with the default thresholds so the user has one to edit."""
+    if CONFIG_FILE.exists():
+        return
+    try:
+        write_private_json(CONFIG_FILE, {"alert_thresholds": list(DEFAULT_ALERT_THRESHOLDS)})
+    except OSError:
+        pass
 
 
 def request_json(
@@ -763,24 +807,37 @@ def notify(title: str, body: str) -> None:
         notify_windows(title, body)
 
 
-def alert_meters(results: list[Provider], threshold: int, alerted: set[tuple[str, str]]) -> None:
-    if threshold <= 0:
+def alert_meters(
+    results: list[Provider],
+    thresholds: list[int],
+    fired: dict[tuple[str, str], int],
+) -> None:
+    """Notify once as a meter rises through each configured threshold.
+
+    `fired` holds the highest threshold already announced per meter (a
+    high-water mark). A level re-arms only after usage falls `ALERT_REARM_MARGIN`
+    points below it, so a meter parked on a boundary is not announced on every
+    refresh; a genuine window renewal drops usage far enough to re-arm every
+    level. reset_at is kept out of the key because some providers jitter it
+    between fetches.
+    """
+    if not thresholds:
         return
     for provider in results:
         for meter in provider.meters:
             if meter.percent is None:
                 continue
-            # Hysteresis: alert once when crossing the threshold, and only
-            # re-arm when usage drops back below it (e.g. the window renewed).
-            # reset_at is kept out of the key because some providers jitter it
-            # between fetches.
             key = (provider.label(), meter.label)
-            if meter.percent < threshold:
-                alerted.discard(key)
+            mark = fired.get(key, 0)
+            # Re-arm: forget any announced level the meter has now dropped
+            # clearly below (window renewed, or usage genuinely fell).
+            if mark and meter.percent < mark - ALERT_REARM_MARGIN:
+                mark = max((t for t in thresholds if meter.percent >= t), default=0)
+                fired[key] = mark
+            level = max((t for t in thresholds if meter.percent >= t), default=0)
+            if level <= mark:
                 continue
-            if key in alerted:
-                continue
-            alerted.add(key)
+            fired[key] = level
             remaining = reset_remaining(meter.reset_at)
             body = f"{meter.label} at {meter.percent:.0f}%" + (f" · renews in {remaining}" if remaining else "")
             notify(f"{provider.name} · {provider.label()}", body)
@@ -973,7 +1030,7 @@ MAX_CARD_WIDTH = 52
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
-def tui(screen: Any, interval: int, alert: int = 80) -> None:
+def tui(screen: Any, interval: int, thresholds: list[int]) -> None:
     curses.curs_set(0)
     screen.timeout(150)
     colors = tui_colors()
@@ -982,7 +1039,7 @@ def tui(screen: Any, interval: int, alert: int = 80) -> None:
     state: dict[str, Any] = {"results": [], "updated_at": None, "fetching": True}
     wake_event = threading.Event()
     stop_event = threading.Event()
-    alerted: set[tuple[str, str]] = set()
+    fired: dict[tuple[str, str], int] = {}
 
     def fetch_loop() -> None:
         while not stop_event.is_set():
@@ -993,7 +1050,7 @@ def tui(screen: Any, interval: int, alert: int = 80) -> None:
                 state["results"] = results
                 state["updated_at"] = dt.datetime.now()
                 state["fetching"] = False
-            alert_meters(results, alert, alerted)
+            alert_meters(results, thresholds, fired)
             wake_event.wait(interval)
             wake_event.clear()
 
@@ -1110,10 +1167,12 @@ def cursor_admin(email: str) -> None:
 
 
 def doctor() -> None:
+    ensure_config_file()
     print(f"Config: {CONFIG_DIR}")
     print(f"Claude: {len(list(CLAUDE_DIR.glob('*/.credentials.json'))) if CLAUDE_DIR.exists() else 0} profile(s)")
     print(f"Codex CLI: {'ok' if shutil.which('codex') else 'not found'}")
     print(f"Cursor: {'configured' if CURSOR_CONFIG.exists() else 'not configured'}")
+    print(f"Alerts: {', '.join(f'{t}%' for t in load_alert_thresholds())} ({CONFIG_FILE.name})")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1121,7 +1180,12 @@ def parser() -> argparse.ArgumentParser:
     sub = result.add_subparsers(dest="command")
     watch = sub.add_parser("watch", help="open the TUI")
     watch.add_argument("--interval", type=int, default=60)
-    watch.add_argument("--alert", type=int, default=80, help="notify when a limit reaches N%% (0 disables)")
+    watch.add_argument(
+        "--alert",
+        type=int,
+        default=None,
+        help="notify only from N%% up, overriding config.json (0 disables notifications)",
+    )
     once = sub.add_parser("once", help="print a single reading and exit")
     once.add_argument("--json", action="store_true")
     add = sub.add_parser("claude-add", help="capture the currently active Claude session")
@@ -1169,7 +1233,12 @@ def main() -> int:
         else:
             if curses is None:
                 raise RuntimeError("the TUI needs the curses module, missing in this Python; use 'once' or the widget")
-            curses.wrapper(tui, getattr(args, "interval", 60), getattr(args, "alert", 80))
+            ensure_config_file()
+            # --alert overrides the config file: a value pins a single threshold,
+            # 0 turns notifications off. Without it, use the configured levels.
+            alert = getattr(args, "alert", None)
+            thresholds = load_alert_thresholds() if alert is None else ([alert] if alert > 0 else [])
+            curses.wrapper(tui, getattr(args, "interval", 60), thresholds)
         return 0
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -24,6 +24,13 @@ async fn fetch_usage() -> Result<String, String> {
     .map_err(|err| err.to_string())?
 }
 
+/// The notification thresholds (percent) the frontend alerts on, read from
+/// config.json. Creates the file with defaults on first read so it is editable.
+#[tauri::command]
+fn alert_thresholds() -> Vec<f64> {
+    collector::config::alert_thresholds()
+}
+
 const MARGIN: i32 = 12;
 const TOGGLE_DEBOUNCE: Duration = Duration::from_millis(300);
 
@@ -216,7 +223,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             fetch_usage,
             hide_to_tray,
-            frontend_ready
+            frontend_ready,
+            alert_thresholds
         ])
         .on_window_event(|window, event| {
             // Alt+F4 (and any close) becomes hide-to-tray.

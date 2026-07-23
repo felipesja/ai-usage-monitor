@@ -27,6 +27,55 @@ pub fn cursor_config() -> PathBuf {
     config_dir().join("cursor.json")
 }
 
+pub fn config_file() -> PathBuf {
+    config_dir().join("config.json")
+}
+
+/// Percentages at which a limit fires a notification. Mirrors
+/// `DEFAULT_ALERT_THRESHOLDS` in `cli/usage_monitor.py`.
+pub fn default_alert_thresholds() -> Vec<f64> {
+    vec![80.0, 90.0, 95.0, 98.0, 100.0]
+}
+
+/// Ints in 1..=100, unique, ascending; the defaults when absent or unusable, so
+/// a hand-edited config that goes wrong still notifies instead of going silent.
+fn normalize_thresholds(value: Option<&Value>) -> Vec<f64> {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return default_alert_thresholds();
+    };
+    let mut levels: Vec<i64> = items
+        .iter()
+        .filter(|v| !v.is_boolean())
+        .filter_map(Value::as_f64)
+        .map(|n| n.round() as i64)
+        .filter(|n| (1..=100).contains(n))
+        .collect();
+    levels.sort_unstable();
+    levels.dedup();
+    if levels.is_empty() {
+        default_alert_thresholds()
+    } else {
+        levels.into_iter().map(|n| n as f64).collect()
+    }
+}
+
+/// Notification levels from config.json, or the defaults if absent/broken.
+/// Writes the default file when missing so the user has one to edit — mirrors
+/// `load_alert_thresholds` + `ensure_config_file` in the Python collector.
+pub fn alert_thresholds() -> Vec<f64> {
+    let path = config_file();
+    if !path.exists() {
+        let defaults = default_alert_thresholds();
+        let json = serde_json::json!({ "alert_thresholds": defaults });
+        let _ = write_json(&path, &json);
+        return defaults;
+    }
+    match read_json(&path) {
+        Ok(value) => normalize_thresholds(value.get("alert_thresholds")),
+        Err(_) => default_alert_thresholds(),
+    }
+}
+
 pub fn read_json(path: &Path) -> Result<Value, String> {
     let text = fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
     serde_json::from_str(&text).map_err(|err| err.to_string())

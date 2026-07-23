@@ -19,7 +19,7 @@ Native Tauri v2 app (`widget/`; WebView2 on Windows, WKWebView on macOS):
 - **Window**: borderless, always on top, out of the taskbar (Windows) / without a Dock icon and visible on every Space (macOS), pinned to the bottom-right corner. Starts hidden (no white flash) and is repositioned on every show.
 - **Tray**: boots with just the tray/menu-bar icon. Left click toggles the widget; right click → "Quit".
 - **Always fresh**: automatic background refresh with a spinner; `r` or the `↻` button force a refresh; `q`/`Esc`/`✕`/Alt+F4 hide to the tray.
-- **Notifications**: a native notification when a limit crosses 80% — once on crossing, re-arming when usage drops back below the threshold.
+- **Notifications**: a native notification as a limit rises through each configured threshold (default `80, 90, 95, 98, 100`% — see [Notification thresholds](#notification-thresholds)) — once per level, re-arming only after usage drops back below it.
 - **Start on login**: the autostart entry (registry Run entry on Windows, LaunchAgent on macOS) is enabled on the first run of a release build.
 
 Each provider uses its brand color (Claude coral, OpenAI green, Cursor white) and is identified by the account's real email. With more than one Claude account, the ones **not in use** get a cyan `◉ STANDBY` marker — the account in use is the one the Claude Code CLI is logged into, detected across environments (Windows and WSL alike), falling back to the open 5h session window when no CLI login is found. Limits show up as `Session` (5h window) and `Weekly` (7-day window).
@@ -58,14 +58,27 @@ ai-usage watch    # live, responsive TUI with automatic refresh
 
 On Windows, call it through Python (`python cli\usage_monitor.py <command>`). `watch` requires the `curses` module, which Windows Python does not ship — use `once` or the widget there.
 
-In the TUI: `r` refreshes, `q` quits. Notifications apply here too:
+In the TUI: `r` refreshes, `q` quits. Notifications apply here too, on the same thresholds as the widget (see below):
 
 ```bash
-ai-usage watch --alert 90   # alert from 90% up
+ai-usage watch --alert 90   # override config.json: alert from 90% up only
 ai-usage watch --alert 0    # turn notifications off
 ```
 
 Outside WSL/Windows the notification is a silent no-op.
+
+## Notification thresholds
+
+Both the widget and the TUI notify as a limit rises through each level in
+`~/.config/ai-usage-monitor/config.json` (`%USERPROFILE%\.config\ai-usage-monitor\config.json` on Windows), created with the defaults on first run:
+
+```json
+{
+  "alert_thresholds": [80, 90, 95, 98, 100]
+}
+```
+
+Each level fires once and re-arms only after usage falls a few points below it, so a limit parked on a boundary is not re-announced every refresh. A window renewal drops usage to ~0, re-arming every level. Edit the list to change the levels (values outside 1–100 are ignored; an empty or unusable list falls back to the defaults). `ai-usage doctor` prints the levels in effect.
 
 ## Setting up accounts
 

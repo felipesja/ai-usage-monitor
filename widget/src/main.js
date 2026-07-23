@@ -2,8 +2,14 @@ const { invoke } = window.__TAURI__.core;
 const notification = window.__TAURI__.notification;
 
 const INTERVAL_MS = 60_000;
-const ALERT_PERCENT = 80; // 0 disables
-const alerted = new Set();
+// Percentages a limit fires a notification at, read from config.json via the
+// backend (falls back to these until it answers). A level re-arms only after
+// usage falls REARM_MARGIN points below it, so a meter parked on a boundary
+// does not re-notify every refresh.
+let alertThresholds = [80, 90, 95, 98, 100];
+const REARM_MARGIN = 5;
+// Highest threshold already announced per meter (a high-water mark).
+const firedLevels = new Map();
 
 const ACCENT = { Claude: "var(--claude)", Codex: "var(--openai)", Cursor: "var(--cursor)" };
 
@@ -34,27 +40,47 @@ async function notify(payload) {
   if (granted) notification.sendNotification(payload);
 }
 
+// Highest threshold at or below `percent`, or 0 if below them all.
+function reachedLevel(percent) {
+  let level = 0;
+  for (const t of alertThresholds) if (percent >= t) level = t;
+  return level;
+}
+
 function checkAlerts(providers) {
-  if (!ALERT_PERCENT) return;
+  if (!alertThresholds.length) return;
   for (const provider of providers) {
     for (const meter of provider.meters || []) {
       if (meter.percent == null) continue;
-      // Hysteresis: alert once when crossing the threshold, and only re-arm
-      // when usage drops back below it (e.g. the window renewed). reset_at is
-      // kept out of the key because some providers jitter it between fetches.
+      // reset_at is kept out of the key because some providers jitter it
+      // between fetches.
       const key = `${provider.email || provider.account}|${meter.label}`;
-      if (meter.percent < ALERT_PERCENT) {
-        alerted.delete(key);
-        continue;
+      let mark = firedLevels.get(key) || 0;
+      // Re-arm: forget any announced level the meter dropped clearly below
+      // (window renewed, or usage genuinely fell). A real reset lands at ~0,
+      // far past the margin, so every level re-arms.
+      if (mark && meter.percent < mark - REARM_MARGIN) {
+        mark = reachedLevel(meter.percent);
+        firedLevels.set(key, mark);
       }
-      if (alerted.has(key)) continue;
-      alerted.add(key);
+      const level = reachedLevel(meter.percent);
+      if (level <= mark) continue;
+      firedLevels.set(key, level);
       const remaining = resetRemaining(meter.reset_at);
       notify({
         title: `${provider.name} · ${provider.email || provider.account}`,
         body: `${meter.label} at ${Math.round(meter.percent)}%` + (remaining ? ` · renews in ${remaining}` : ""),
       });
     }
+  }
+}
+
+async function loadAlertThresholds() {
+  try {
+    const values = await invoke("alert_thresholds");
+    if (Array.isArray(values) && values.length) alertThresholds = values;
+  } catch (error) {
+    console.error(error);
   }
 }
 
@@ -205,5 +231,6 @@ setTimeout(sendReady, 250);
 
 document.getElementById("autorefresh").textContent = `auto-refresh every ${INTERVAL_MS / 1000}s`;
 
+loadAlertThresholds();
 refresh();
 setInterval(refresh, INTERVAL_MS);
