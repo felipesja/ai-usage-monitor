@@ -614,8 +614,11 @@ def wsl_claude_configs() -> list[Path]:
     for name in filter(None, names):
         root = Path(f"\\\\wsl.localhost\\{name}")
         paths.append(root / "root" / ".claude.json")
+        paths.extend(custom_dir_claude_configs(root / "root"))
         try:
-            paths.extend(sorted((root / "home").glob("*/.claude.json")))
+            for home in sorted((root / "home").iterdir()):
+                paths.append(home / ".claude.json")
+                paths.extend(custom_dir_claude_configs(home))
         except OSError:
             pass
     return paths
@@ -623,8 +626,27 @@ def wsl_claude_configs() -> list[Path]:
 
 def windows_claude_configs() -> list[Path]:
     """The CLI configs on the Windows profiles, seen from WSL through /mnt."""
+    if not Path("/mnt").is_dir():
+        return []
     try:
-        return sorted(Path("/mnt").glob("*/Users/*/.claude.json")) if Path("/mnt").is_dir() else []
+        paths = []
+        for home in sorted(Path("/mnt").glob("*/Users/*")):
+            paths.append(home / ".claude.json")
+            paths.extend(custom_dir_claude_configs(home))
+        return paths
+    except OSError:
+        return []
+
+
+def custom_dir_claude_configs(base: Path) -> list[Path]:
+    """`.claude.json` inside each `.claude*` dir under `base`.
+
+    A CLI running with a custom `CLAUDE_CONFIG_DIR` keeps its copy *inside*
+    that dir (the default lives next to `~/.claude`, not in it) — the
+    `~/.claude*` naming is the discoverable convention for those setups.
+    """
+    try:
+        return sorted(p / ".claude.json" for p in base.glob(".claude*") if p.is_dir())
     except OSError:
         return []
 
@@ -632,17 +654,18 @@ def windows_claude_configs() -> list[Path]:
 def claude_config_paths() -> list[Path]:
     """Every `.claude.json` the Claude Code CLI may have written on this machine,
     on both sides of WSL — the answer has to be the same from Windows or Linux.
-    macOS has no second side, so there the local file is the whole story."""
+    macOS has no second side, so there the local files are the whole story."""
     paths = []
     override = os.environ.get("CLAUDE_CONFIG_DIR")
     if override:
         paths.append(Path(override) / ".claude.json")
     paths.append(Path.home() / ".claude.json")
+    paths.extend(custom_dir_claude_configs(Path.home()))
     if os.name == "nt":
         paths.extend(wsl_claude_configs())
     elif sys.platform.startswith("linux"):
         paths.extend(windows_claude_configs())
-    return paths
+    return list(dict.fromkeys(paths))
 
 
 def claude_active_emails() -> set[str]:

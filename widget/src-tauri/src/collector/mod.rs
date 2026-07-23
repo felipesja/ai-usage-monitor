@@ -216,16 +216,43 @@ fn active_claude_emails() -> HashSet<String> {
         .collect()
 }
 
+/// `.claude.json` inside each `.claude*` dir under `base`.
+///
+/// A CLI running with a custom `CLAUDE_CONFIG_DIR` keeps its copy *inside*
+/// that dir (the default lives next to `~/.claude`, not in it) — the
+/// `~/.claude*` naming is the discoverable convention for those setups.
+/// Mirrors `custom_dir_claude_configs` in `usage_monitor.py`.
+fn custom_dir_claude_configs(base: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(base) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let named_claude = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".claude"));
+            if named_claude && path.is_dir() {
+                out.push(path.join(".claude.json"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Every `.claude.json` the CLI may have written on this machine, on both sides
 /// of WSL — the answer has to be the same from Windows or Linux. macOS has no
-/// second side, so there the local file is the whole story.
+/// second side, so there the local files are the whole story.
 fn claude_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         paths.push(PathBuf::from(dir).join(".claude.json"));
     }
-    paths.push(config::home().join(".claude.json"));
+    let home = config::home();
+    paths.push(home.join(".claude.json"));
+    paths.extend(custom_dir_claude_configs(&home));
     paths.extend(other_side_claude_configs());
+    paths.dedup();
     paths
 }
 
@@ -257,9 +284,11 @@ fn other_side_claude_configs() -> Vec<PathBuf> {
     for name in listing.lines().map(str::trim).filter(|name| !name.is_empty()) {
         let root = PathBuf::from(format!(r"\\wsl.localhost\{name}"));
         paths.push(root.join("root").join(".claude.json"));
+        paths.extend(custom_dir_claude_configs(&root.join("root")));
         if let Ok(entries) = fs::read_dir(root.join("home")) {
             for entry in entries.flatten() {
                 paths.push(entry.path().join(".claude.json"));
+                paths.extend(custom_dir_claude_configs(&entry.path()));
             }
         }
     }
@@ -277,6 +306,7 @@ fn other_side_claude_configs() -> Vec<PathBuf> {
         if let Ok(users) = fs::read_dir(drive.path().join("Users")) {
             for user in users.flatten() {
                 paths.push(user.path().join(".claude.json"));
+                paths.extend(custom_dir_claude_configs(&user.path()));
             }
         }
     }
