@@ -1139,6 +1139,14 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    # The Windows console defaults to a legacy code page, and the bars, badges
+    # and currency symbols are not in it — force UTF-8 so `once` prints the same
+    # everywhere instead of dying with an encoding error.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, OSError):
+            pass
     args = parser().parse_args()
     command = args.command or ("watch" if sys.stdout.isatty() else "once")
     try:
