@@ -133,6 +133,30 @@ fn money(minor: f64, currency: &str, places: usize) -> String {
     format!("{symbol}{value:.places$}")
 }
 
+/// Refresh-if-needed plus account identity (email, plan) for the credential at
+/// `path`, without collecting usage. Used by the accounts UI registration.
+pub(crate) fn identify(path: &Path) -> Result<(String, String), String> {
+    let mut data = read_json(path)?;
+    refresh(path, &mut data)?;
+    let oauth = data
+        .get("claudeAiOauth")
+        .ok_or("the file does not contain a Claude OAuth session")?;
+    let token = oauth
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .ok_or("credential has no accessToken")?
+        .to_string();
+    let plan = title_case(oauth.get("subscriptionType").and_then(Value::as_str).unwrap_or(""));
+    let client = super::http_client()?;
+    let email = get_json(&client, PROFILE_URL, &token)?
+        .get("account")
+        .and_then(|account| account.get("email"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or("the profile response has no email")?;
+    Ok((email, plan))
+}
+
 /// Refreshes the access token if it expires in under 2 min; writes it back.
 fn refresh(path: &Path, data: &mut Value) -> Result<(), String> {
     let (refresh_token, scopes) = {

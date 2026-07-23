@@ -84,10 +84,23 @@ async function loadAlertThresholds() {
   }
 }
 
+// Providers that were never set up on this machine render as noise (Codex
+// without the CLI installed, Cursor without a key). Keep them out of the
+// panel — the accounts view (a) still reports their status. A provider that
+// WAS set up and then breaks keeps showing its error.
+function isUnconfigured(provider) {
+  if (!provider.error || provider.meters?.length) return false;
+  if (provider.name === "Cursor") return provider.error.startsWith("set it up with");
+  if (provider.name === "Codex") {
+    return provider.error.includes("did not start") && provider.error.includes("no local session found");
+  }
+  return false;
+}
+
 function render(providers) {
   const root = document.getElementById("providers");
   root.replaceChildren();
-  for (const provider of providers) {
+  for (const provider of providers.filter((p) => !isUnconfigured(p))) {
     const box = document.createElement("div");
     box.className = "provider";
     box.setAttribute("data-tauri-drag-region", "");
@@ -189,6 +202,8 @@ function setStatus(icon, text, fetching) {
   status.append(iconSpan, textSpan);
 }
 
+let lastProviders = [];
+
 async function refresh() {
   if (refreshing) return;
   refreshing = true;
@@ -196,11 +211,13 @@ async function refresh() {
   try {
     const raw = await invoke("fetch_usage");
     const providers = JSON.parse(raw);
+    lastProviders = providers;
     render(providers);
     checkAlerts(providers);
     // en-GB keeps the 24h HH:MM:SS shape the compact layout is sized for.
     setStatus("●", new Date().toLocaleTimeString("en-GB"), false);
-    document.getElementById("subtitle").textContent = `${providers.length} subscriptions`;
+    const visible = providers.filter((p) => !isUnconfigured(p)).length;
+    document.getElementById("subtitle").textContent = `${visible} subscription${visible === 1 ? "" : "s"}`;
   } catch (error) {
     setStatus("!", "refresh failed", true);
     console.error(error);
@@ -209,11 +226,204 @@ async function refresh() {
   }
 }
 
+// ---- Accounts view (⚙) -----------------------------------------------------
+
+function accountsOpen() {
+  return document.body.classList.contains("show-accounts");
+}
+
+function setAccountsMsg(text, kind) {
+  const msg = document.getElementById("acct-msg");
+  if (!msg) return;
+  msg.textContent = text || "";
+  msg.className = `acct-msg${kind ? ` ${kind}` : ""}`;
+}
+
+function acctRow(...children) {
+  const row = document.createElement("div");
+  row.className = "acct-row";
+  row.append(...children);
+  return row;
+}
+
+function acctSpan(className, text) {
+  const span = document.createElement("span");
+  span.className = className;
+  span.textContent = text;
+  return span;
+}
+
+async function renderAccounts() {
+  const root = document.getElementById("accounts");
+  root.replaceChildren();
+
+  let detection = { claude: [], cursor_configured: false };
+  try {
+    detection = JSON.parse(await invoke("detect_accounts"));
+  } catch (error) {
+    console.error(error);
+  }
+
+  // Claude: registered profiles (from the last collection), then detected
+  // credential sources. Adding reads the source — on macOS the Keychain may
+  // ask for permission — and names the profile after the account's email.
+  const claude = document.createElement("div");
+  claude.className = "acct-section";
+  claude.appendChild(acctSpan("acct-title", "Claude"));
+  const registered = lastProviders.filter((p) => p.name === "Claude");
+  for (const provider of registered) {
+    const remove = acctSpan("acct-act rm", "✕ remove");
+    remove.addEventListener("click", async () => {
+      try {
+        await invoke("remove_claude_account", { profile: provider.account });
+        setAccountsMsg(`removed ${provider.account}`, "ok");
+        await refresh();
+        renderAccounts();
+      } catch (error) {
+        setAccountsMsg(String(error), "err");
+      }
+    });
+    claude.appendChild(
+      acctRow(
+        acctSpan("who", provider.email || provider.account),
+        acctSpan("meta", provider.plan || ""),
+        remove,
+      ),
+    );
+  }
+  if (!registered.length) {
+    claude.appendChild(acctSpan("acct-hint", "no profiles registered"));
+  }
+  for (const candidate of detection.claude) {
+    const add = acctSpan("acct-act add", "+ add");
+    add.addEventListener("click", async () => {
+      add.classList.add("disabled");
+      add.textContent = "adding…";
+      setAccountsMsg(`reading ${candidate.label}…`);
+      try {
+        const result = JSON.parse(await invoke("add_claude_account", { source: candidate.id }));
+        setAccountsMsg(
+          result.already
+            ? `${result.email} is already registered as '${result.profile}'`
+            : `added ${result.email} (${result.plan}) as '${result.profile}'`,
+          "ok",
+        );
+        await refresh();
+        renderAccounts();
+      } catch (error) {
+        setAccountsMsg(String(error), "err");
+        add.classList.remove("disabled");
+        add.textContent = "+ add";
+      }
+    });
+    claude.appendChild(acctRow(acctSpan("who", candidate.label), add));
+  }
+  root.appendChild(claude);
+
+  // Codex needs no registration; report what the collector sees.
+  const codex = document.createElement("div");
+  codex.className = "acct-section";
+  codex.appendChild(acctSpan("acct-title", "Codex"));
+  const codexProvider = lastProviders.find((p) => p.name === "Codex");
+  codex.appendChild(
+    acctSpan(
+      "acct-hint",
+      codexProvider && !codexProvider.error
+        ? `auto-detected · ${codexProvider.email || "logged in"}`
+        : "auto-detected via the Codex CLI — none found",
+    ),
+  );
+  root.appendChild(codex);
+
+  // Cursor: no local credential to detect; manual key/cookie entry.
+  const cursor = document.createElement("div");
+  cursor.className = "acct-section";
+  cursor.appendChild(acctSpan("acct-title", "Cursor"));
+  if (detection.cursor_configured) {
+    const remove = acctSpan("acct-act rm", "✕ remove");
+    remove.addEventListener("click", async () => {
+      try {
+        await invoke("remove_cursor_config");
+        setAccountsMsg("Cursor config removed", "ok");
+        await refresh();
+        renderAccounts();
+      } catch (error) {
+        setAccountsMsg(String(error), "err");
+      }
+    });
+    cursor.appendChild(acctRow(acctSpan("who", "configured"), remove));
+  } else {
+    const form = document.createElement("div");
+    form.className = "acct-form";
+    const method = document.createElement("select");
+    method.className = "acct-select";
+    method.append(new Option("Admin API key", "admin_key"), new Option("Dashboard cookie", "dashboard_cookie"));
+    const secret = document.createElement("input");
+    secret.type = "password";
+    secret.className = "acct-input";
+    secret.placeholder = "key_…";
+    const email = document.createElement("input");
+    email.type = "text";
+    email.className = "acct-input";
+    email.placeholder = "your-email@company.com";
+    const emailLabel = document.createElement("label");
+    emailLabel.append("email", email);
+    method.addEventListener("change", () => {
+      const admin = method.value === "admin_key";
+      secret.placeholder = admin ? "key_…" : "WorkosCursorSessionToken";
+      emailLabel.style.display = admin ? "" : "none";
+    });
+    const save = acctSpan("acct-save", "save");
+    save.addEventListener("click", async () => {
+      try {
+        await invoke("save_cursor_config", {
+          method: method.value,
+          secret: secret.value,
+          email: email.value,
+        });
+        setAccountsMsg("Cursor configured", "ok");
+        await refresh();
+        renderAccounts();
+      } catch (error) {
+        setAccountsMsg(String(error), "err");
+      }
+    });
+    const methodLabel = document.createElement("label");
+    methodLabel.append("method", method);
+    const secretLabel = document.createElement("label");
+    secretLabel.append("secret", secret);
+    form.append(methodLabel, secretLabel, emailLabel, save);
+    cursor.appendChild(form);
+  }
+  root.appendChild(cursor);
+
+  const msg = document.createElement("div");
+  msg.id = "acct-msg";
+  msg.className = "acct-msg";
+  root.appendChild(msg);
+}
+
+function toggleAccounts(open) {
+  const show = open ?? !accountsOpen();
+  document.body.classList.toggle("show-accounts", show);
+  document.getElementById("foothint").textContent = show ? "esc back" : "r refresh · a accounts · esc hide";
+  if (show) renderAccounts();
+}
+
 document.getElementById("refresh").addEventListener("click", refresh);
+document.getElementById("settings").addEventListener("click", () => toggleAccounts());
 document.getElementById("close").addEventListener("click", () => invoke("hide_to_tray"));
 document.addEventListener("keydown", (event) => {
-  if (event.key === "q" || event.key === "Escape") invoke("hide_to_tray");
+  const typing = ["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName);
+  if (event.key === "Escape") {
+    if (accountsOpen()) toggleAccounts(false);
+    else invoke("hide_to_tray");
+    return;
+  }
+  if (typing) return;
+  if (event.key === "q") invoke("hide_to_tray");
   if (event.key === "r") refresh();
+  if (event.key === "a") toggleAccounts();
 });
 
 // The window starts hidden. Waiting one frame guarantees the WebView has

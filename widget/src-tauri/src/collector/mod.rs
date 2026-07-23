@@ -4,7 +4,7 @@
 //! `asdict` so the frontend (`src/main.js`) consumes it unchanged.
 
 pub mod config;
-mod claude;
+pub mod claude;
 mod codex;
 mod cursor;
 mod date;

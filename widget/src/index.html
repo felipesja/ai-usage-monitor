@@ -79,6 +79,42 @@
     footer .btn { color: var(--dim); cursor: pointer; font-size: 13px; }
     footer .btn:hover { color: var(--text); }
     footer .btn.close:hover { color: var(--red); }
+
+    /* Accounts view (⚙): swapped in place of the provider list. */
+    #accounts { flex: 1; overflow-y: auto; display: none; }
+    body.show-accounts main#providers { display: none; }
+    body.show-accounts #accounts { display: block; }
+    .acct-section { margin-bottom: 16px; }
+    .acct-title { color: var(--cyan); font-weight: 700; margin-bottom: 4px; }
+    .acct-row { display: flex; gap: 8px; align-items: baseline; padding: 2px 0 2px 10px; }
+    .acct-row .who { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .acct-row .meta { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
+    .acct-act { cursor: pointer; white-space: nowrap; }
+    .acct-act.add { color: var(--green); }
+    .acct-act.add:hover { color: var(--text); }
+    .acct-act.rm { color: var(--dim); }
+    .acct-act.rm:hover { color: var(--red); }
+    .acct-act.disabled { color: var(--dim); pointer-events: none; }
+    .acct-hint { color: var(--muted); font-size: 10.5px; padding-left: 10px; }
+    .acct-msg { font-size: 10.5px; margin: 4px 0 0 10px; min-height: 14px; color: var(--muted); }
+    .acct-msg.err { color: var(--red); }
+    .acct-msg.ok { color: var(--green); }
+    .acct-form { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 0 10px; }
+    .acct-form label { color: var(--muted); font-size: 10.5px; display: flex; gap: 6px; align-items: center; }
+    .acct-input, .acct-select {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--text);
+      font: inherit;
+      font-size: 11px;
+      border-radius: 4px;
+      padding: 3px 6px;
+      flex: 1;
+      min-width: 0;
+    }
+    .acct-select option { background: #1b1d1e; }
+    .acct-save { color: var(--cyan); cursor: pointer; align-self: flex-start; }
+    .acct-save:hover { color: var(--text); }
   </style>
 </head>
 <body data-tauri-drag-region>
@@ -91,9 +127,11 @@
     <span class="autorefresh" id="autorefresh">auto-refresh every 60s</span>
   </div>
   <main id="providers" data-tauri-drag-region></main>
+  <section id="accounts"></section>
   <footer>
-    <span>r refresh · esc hide</span>
+    <span id="foothint">r refresh · a accounts · esc hide</span>
     <span class="buttons">
+      <span class="btn" id="settings" title="accounts">⚙</span>
       <span class="btn" id="refresh" title="refresh">↻</span>
       <span class="btn close" id="close" title="hide to tray">✕</span>
     </span>
