@@ -550,6 +550,35 @@ def notify_windows(title: str, body: str) -> None:
         pass
 
 
+def notify_macos(title: str, body: str) -> None:
+    """Native macOS notification via osascript."""
+    # json.dumps produces valid AppleScript string literals (double quotes,
+    # backslash escapes), keeping the values inert inside the script.
+    # ensure_ascii=False: AppleScript does not understand \uXXXX escapes,
+    # and the meter separator is a literal "·".
+    def quote(value: str) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
+    script = f"display notification {quote(body)} with title {quote(title)}"
+    try:
+        subprocess.Popen(
+            ["osascript", "-e", script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        pass
+
+
+def notify(title: str, body: str) -> None:
+    if sys.platform == "darwin":
+        notify_macos(title, body)
+    else:
+        notify_windows(title, body)
+
+
 def alert_meters(results: list[Provider], threshold: int, alerted: set[tuple[str, str]]) -> None:
     if threshold <= 0:
         return
@@ -570,7 +599,7 @@ def alert_meters(results: list[Provider], threshold: int, alerted: set[tuple[str
             alerted.add(key)
             remaining = reset_remaining(meter.reset_at)
             body = f"{meter.label} at {meter.percent:.0f}%" + (f" · renews in {remaining}" if remaining else "")
-            notify_windows(f"{provider.name} · {provider.label()}", body)
+            notify(f"{provider.name} · {provider.label()}", body)
 
 
 def bar(percent: float | None, width: int = 24) -> str:
