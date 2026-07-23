@@ -10,7 +10,8 @@ Native desktop widget (Tauri v2; WebView2 on Windows, WKWebView on macOS) carryi
 - **Notifications**: `tauri-plugin-notification` when a limit crosses 80% — once on crossing, re-arming when usage drops back below the threshold (hysteresis). On macOS the system asks for permission on the first alert, and notifications only work from the bundled `.app` (not the bare dev binary).
 - **Tray**: the app starts hidden, with only the tray/menu-bar icon (a monochrome template icon on macOS, tinted by the system). Left click opens the window with focus (click again to hide); right click → "Quit" exits the app.
 - **Per-platform config**: `tauri.conf.json` holds the shared config; Tauri merges `tauri.windows.conf.json` (NSIS target) or `tauri.macos.conf.json` (app/dmg targets, `macOSPrivateApi` for the transparent window) over it at build time.
-- **Interaction**: `r` or the `↻` button refresh; `q`/`Esc`, `✕`, or Alt+F4 hide to the tray; dragging any empty area moves the window (it returns to the corner on reopen).
+- **Interaction**: `r` or the `↻` button refresh; `a` or `⚙` open the accounts view (`Esc` goes back); `q`/`Esc`, `✕`, or Alt+F4 hide to the tray; dragging any empty area moves the window (it returns to the corner on reopen).
+- **Accounts**: the accounts view registers Claude profiles from the credentials already on the machine — macOS Keychain entries (one per Claude Code config dir) and `~/.claude*/.credentials.json` files, deduplicated against what is registered — and configures Cursor (admin key or dashboard cookie). Detection never reads a secret; that happens on Add, behind the macOS permission prompt. Providers with nothing configured stay hidden in the main panel.
 
 ## Building
 
