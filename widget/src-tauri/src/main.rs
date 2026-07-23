@@ -32,16 +32,66 @@ struct TrayState {
     pinned: bool,
     frontend_ready: bool,
     last_toggle: Option<Instant>,
+    /// Where the tray icon was last clicked (physical px). macOS anchors the
+    /// panel below it, like other menu bar widgets.
+    #[cfg(target_os = "macos")]
+    tray_click: Option<tauri::PhysicalPosition<f64>>,
 }
 
-/// Bottom-right corner of the work area. No position persistence: every show
+/// macOS: just below the menu bar, horizontally centered on the tray icon —
+/// the menu-bar-widget convention. Everywhere else (or before any tray click):
+/// bottom-right corner of the work area. No position persistence: every show
 /// repositions, even if the window was dragged elsewhere.
 fn apply_position(window: &WebviewWindow) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let click = {
+            let state = window.app_handle().state::<Mutex<TrayState>>();
+            let st = state.lock().expect("tray state poisoned");
+            st.tray_click
+        };
+        if let Some(click) = click {
+            // The monitor holding the clicked menu bar, not the hidden
+            // window's notion of "current". Containment test in physical px:
+            // `monitor_from_point` takes logical points on macOS, which would
+            // pick the wrong display for a physical click position.
+            let monitor = window
+                .app_handle()
+                .available_monitors()?
+                .into_iter()
+                .find(|m| {
+                    let pos = m.position();
+                    let size = m.size();
+                    click.x >= pos.x as f64
+                        && click.x < pos.x as f64 + size.width as f64
+                        && click.y >= pos.y as f64
+                        && click.y < pos.y as f64 + size.height as f64
+                })
+                .or(window.current_monitor()?);
+            if let Some(monitor) = monitor {
+                let area = monitor.work_area();
+                let size = window.outer_size()?;
+                let margin = (MARGIN as f64 * monitor.scale_factor()).round() as i32;
+                let gap = (6.0 * monitor.scale_factor()).round() as i32;
+                let x = (click.x as i32 - size.width as i32 / 2).clamp(
+                    area.position.x + margin,
+                    area.position.x + area.size.width as i32 - size.width as i32 - margin,
+                );
+                // The work area already excludes the menu bar.
+                let y = area.position.y + gap;
+                window.set_position(tauri::PhysicalPosition::new(x, y))?;
+                return Ok(());
+            }
+        }
+    }
     if let Some(monitor) = window.current_monitor()? {
         let area = monitor.work_area();
         let size = window.outer_size()?;
-        let x = area.position.x + area.size.width as i32 - size.width as i32 - MARGIN;
-        let y = area.position.y + area.size.height as i32 - size.height as i32 - MARGIN;
+        // The work area is in physical pixels; scale the margin so it reads as
+        // 12 logical px regardless of DPI (e.g. Retina's 2x).
+        let margin = (MARGIN as f64 * monitor.scale_factor()).round() as i32;
+        let x = area.position.x + area.size.width as i32 - size.width as i32 - margin;
+        let y = area.position.y + area.size.height as i32 - size.height as i32 - margin;
         window.set_position(tauri::PhysicalPosition::new(x, y))?;
     }
     Ok(())
@@ -87,8 +137,11 @@ fn on_tray_event(app: &AppHandle, event: TrayIconEvent) {
         TrayIconEvent::Click {
             button: MouseButton::Left,
             button_state: MouseButtonState::Up,
+            position,
             ..
         } => {
+            #[cfg(not(target_os = "macos"))]
+            let _ = position;
             let Some(window) = app.get_webview_window("main") else {
                 return;
             };
@@ -102,6 +155,10 @@ fn on_tray_event(app: &AppHandle, event: TrayIconEvent) {
             let action = {
                 let state = app.state::<Mutex<TrayState>>();
                 let mut st = state.lock().expect("tray state poisoned");
+                #[cfg(target_os = "macos")]
+                {
+                    st.tray_click = Some(position);
+                }
                 let now = Instant::now();
                 // A double-click emits two Clicks; without debounce it flickers.
                 if st
@@ -173,26 +230,43 @@ fn main() {
             }
         })
         .setup(|app| {
-            // Start with Windows (a Run entry in the registry). Release only: in
-            // dev the exe is temporary and should not linger in the registry.
+            // Autostart on login (registry Run entry on Windows, LaunchAgent on
+            // macOS). Release only: in dev the exe is temporary and should not
+            // linger in the registry.
             #[cfg(not(debug_assertions))]
             let _ = app.autolaunch().enable();
+
+            // macOS: menu-bar utility without a Dock icon (`skipTaskbar` is a
+            // Windows/Linux concept).
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             app.manage(Mutex::new(TrayState::default()));
 
             // Position during setup for the first show (window starts hidden).
             let window = app.get_webview_window("main").expect("main window missing");
+            // macOS: widget convention — the panel follows the user to every
+            // Space instead of staying behind on the one where it was opened.
+            #[cfg(target_os = "macos")]
+            let _ = window.set_visible_on_all_workspaces(true);
             apply_position(&window)?;
 
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app).item(&quit).build()?;
-            TrayIconBuilder::with_id("tray")
-                .icon(
-                    app.default_window_icon()
-                        .expect("default icon missing")
-                        .clone(),
-                )
-                .tooltip("AI Usage")
+            let tray = TrayIconBuilder::with_id("tray").icon(
+                app.default_window_icon()
+                    .expect("default icon missing")
+                    .clone(),
+            );
+            // macOS: a template icon (monochrome + alpha) so the menu bar tints
+            // it to match light/dark appearance.
+            #[cfg(target_os = "macos")]
+            let tray = tray
+                .icon(tauri::image::Image::from_bytes(include_bytes!(
+                    "../icons/tray-macos.png"
+                ))?)
+                .icon_as_template(true);
+            tray.tooltip("AI Usage")
                 .menu(&menu)
                 // Without this, a left click opens the menu instead of toggling.
                 .show_menu_on_left_click(false)

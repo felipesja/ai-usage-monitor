@@ -121,15 +121,47 @@ def safe_name(value: str) -> str:
     return value
 
 
-def claude_add(name: str, source: Path) -> None:
-    name = safe_name(name)
-    data = read_json(source)
+def claude_keychain_read() -> dict[str, Any] | None:
+    """The Claude Code session from the macOS Keychain, or None.
+
+    On macOS the CLI stores OAuth credentials in the Keychain (service
+    "Claude Code-credentials") instead of `.credentials.json` — even when
+    CLAUDE_CONFIG_DIR points elsewhere. The user may see a Keychain
+    permission prompt on the first read.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return json.loads(result.stdout)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
+        return None
+
+
+def register_claude(name: str, data: dict[str, Any]) -> None:
     oauth = data.get("claudeAiOauth") or {}
     if not oauth.get("accessToken") or not oauth.get("refreshToken"):
-        raise RuntimeError("the file does not contain a complete Claude OAuth session")
+        raise RuntimeError("the source does not contain a complete Claude OAuth session")
     target = CLAUDE_DIR / name / ".credentials.json"
     write_private_json(target, data)
     print(f"Claude profile '{name}' registered at {target.parent}")
+
+
+def claude_add(name: str, source: Path) -> None:
+    name = safe_name(name)
+    if source.exists():
+        data = read_json(source)
+    else:
+        # macOS: the active session lives in the Keychain, not on disk.
+        data = claude_keychain_read()
+        if data is None:
+            raise RuntimeError(f"{source}: not found")
+    register_claude(name, data)
 
 
 def claude_login(name: str, email: str | None) -> None:
@@ -147,9 +179,17 @@ def claude_login(name: str, email: str | None) -> None:
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"Claude login exited with code {exc.returncode}") from None
         source = temp_dir / ".credentials.json"
-        if not source.exists():
+        if source.exists():
+            claude_add(name, source)
+            return
+        # macOS: the login lands in the Keychain even with CLAUDE_CONFIG_DIR
+        # set, so capture it from there. Note that in this case the CLI also
+        # replaced the default session's Keychain entry — the "does not disturb
+        # open sessions" promise only holds where the temp profile works.
+        data = claude_keychain_read()
+        if data is None:
             raise RuntimeError("login finished without creating a credential")
-        claude_add(name, source)
+        register_claude(name, data)
 
 
 def refresh_claude(path: Path, data: dict[str, Any]) -> dict[str, Any]:
@@ -550,6 +590,35 @@ def notify_windows(title: str, body: str) -> None:
         pass
 
 
+def notify_macos(title: str, body: str) -> None:
+    """Native macOS notification via osascript."""
+    # json.dumps produces valid AppleScript string literals (double quotes,
+    # backslash escapes), keeping the values inert inside the script.
+    # ensure_ascii=False: AppleScript does not understand \uXXXX escapes,
+    # and the meter separator is a literal "·".
+    def quote(value: str) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
+    script = f"display notification {quote(body)} with title {quote(title)}"
+    try:
+        subprocess.Popen(
+            ["osascript", "-e", script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        pass
+
+
+def notify(title: str, body: str) -> None:
+    if sys.platform == "darwin":
+        notify_macos(title, body)
+    else:
+        notify_windows(title, body)
+
+
 def alert_meters(results: list[Provider], threshold: int, alerted: set[tuple[str, str]]) -> None:
     if threshold <= 0:
         return
@@ -570,7 +639,7 @@ def alert_meters(results: list[Provider], threshold: int, alerted: set[tuple[str
             alerted.add(key)
             remaining = reset_remaining(meter.reset_at)
             body = f"{meter.label} at {meter.percent:.0f}%" + (f" · renews in {remaining}" if remaining else "")
-            notify_windows(f"{provider.name} · {provider.label()}", body)
+            notify(f"{provider.name} · {provider.label()}", body)
 
 
 def bar(percent: float | None, width: int = 24) -> str:

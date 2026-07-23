@@ -106,8 +106,48 @@ fn codex_command() -> Result<Command, String> {
     }
     #[cfg(not(windows))]
     {
-        Ok(Command::new("codex"))
+        let binary = find_codex();
+        let mut command = Command::new(&binary);
+        // GUI apps launched by launchd/Finder get a minimal PATH (no Homebrew,
+        // no nvm). Prepend the binary's own directory so the npm shim finds its
+        // sibling `node`, mirroring the Python collector's `codex_live`.
+        if let Some(parent) = binary.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            let path = std::env::var("PATH").unwrap_or_default();
+            command.env("PATH", format!("{}:{path}", parent.display()));
+        }
+        Ok(command)
     }
+}
+
+/// `codex` from PATH, then the install locations a GUI app's minimal launchd
+/// PATH misses (nvm, ~/.local/bin, Homebrew) — mirroring Python's `codex_bin`.
+#[cfg(not(windows))]
+fn find_codex() -> PathBuf {
+    if let Some(found) = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("codex"))
+            .find(|candidate| candidate.is_file())
+    }) {
+        return found;
+    }
+    let home = home();
+    let mut candidates = Vec::new();
+    // Highest nvm version first, like Python's `sorted(...)[-1]`.
+    if let Ok(entries) = std::fs::read_dir(home.join(".nvm").join("versions").join("node")) {
+        let mut versions: Vec<PathBuf> =
+            entries.flatten().map(|entry| entry.path().join("bin").join("codex")).collect();
+        versions.sort();
+        versions.reverse();
+        candidates.extend(versions);
+    }
+    candidates.push(home.join(".local").join("bin").join("codex"));
+    candidates.push(home.join("bin").join("codex"));
+    candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
+    candidates.push(PathBuf::from("/usr/local/bin/codex"));
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from("codex"))
 }
 
 fn live() -> Result<Value, String> {
