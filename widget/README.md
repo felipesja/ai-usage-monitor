@@ -12,6 +12,7 @@ Native desktop widget (Tauri v2; WebView2 on Windows, WKWebView on macOS) carryi
 - **Per-platform config**: `tauri.conf.json` holds the shared config; Tauri merges `tauri.windows.conf.json` (NSIS target) or `tauri.macos.conf.json` (app/dmg targets, `macOSPrivateApi` for the transparent window) over it at build time.
 - **Interaction**: `r` or the `↻` button refresh; `a` or `⚙` open the accounts view (`Esc` goes back); `q`/`Esc`, `✕`, or Alt+F4 hide to the tray; dragging any empty area moves the window (it returns to the corner on reopen).
 - **Accounts**: the accounts view registers Claude profiles from the credentials already on the machine — macOS Keychain entries (one per Claude Code config dir) and `~/.claude*/.credentials.json` files, deduplicated against what is registered — and configures Cursor (admin key or dashboard cookie). Detection never reads a secret; that happens on Add, behind the macOS permission prompt. Providers with nothing configured stay hidden in the main panel.
+- **Optional activity hint**: an external launcher or router can write `~/.config/ai-usage-monitor/claude-active-account.json` with `email` and Unix `updated_at`. A fresh hint identifies the active Claude account for one 5h window. The app never requires or creates this file; standard Windows and macOS setups keep using Claude Code login detection.
 
 ## Building
 

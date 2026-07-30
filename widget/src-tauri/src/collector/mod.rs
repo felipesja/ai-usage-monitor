@@ -20,6 +20,8 @@ use serde::Serialize;
 const CLAUDE_SESSION_SECONDS: u64 = 5 * 3600;
 /// Environments whose configs are this close apart are both taken as in use.
 const CLAUDE_CONFIG_TIE_SECONDS: u64 = 600;
+/// An external activity hint remains relevant for the current quota window.
+const CLAUDE_ACTIVITY_HINT_SECONDS: u64 = CLAUDE_SESSION_SECONDS;
 
 #[derive(Serialize, Clone)]
 pub struct Meter {
@@ -129,10 +131,15 @@ fn claude_profiles() -> Vec<PathBuf> {
 
 /// Flag the Claude accounts that are not the one in use.
 ///
-/// Primary signal: the account the Claude Code CLI is logged into, read from the
-/// most recently touched `.claude.json` across environments. A single copy of
-/// that file is not enough — Windows and WSL keep separate ones, and looking at
-/// only the local side leaves the account of the *other* side wrongly unflagged.
+/// An optional external activity hint takes precedence when present. This lets
+/// launchers or routers report the upstream account without making them a
+/// dependency of the app.
+///
+/// Without a fresh hint, use the account the Claude Code CLI is logged into,
+/// read from the most recently touched `.claude.json` across environments.
+/// A single copy of that file is not enough — Windows and WSL keep separate
+/// ones, and looking at only the local side leaves the account of the *other*
+/// side wrongly unflagged.
 /// When no `.claude.json` names a known account (usage driven from claude.ai or
 /// the desktop app), fall back to the session window: an account whose 5h window
 /// already rolled over cannot be the one burning quota. If nothing distinguishes
@@ -146,7 +153,10 @@ fn mark_standby(providers: &mut [Provider]) {
     if claude.len() < 2 {
         return;
     }
-    let emails = active_claude_emails();
+    let mut emails = external_active_claude_emails();
+    if emails.is_empty() {
+        emails = active_claude_emails();
+    }
     let mut in_use: HashSet<String> = claude
         .iter()
         .filter(|p| emails.contains(&p.email.to_lowercase()))
@@ -167,6 +177,36 @@ fn mark_standby(providers: &mut [Provider]) {
         .filter(|p| p.name == "Claude" && p.error.is_none())
     {
         provider.standby = !in_use.contains(&provider.account);
+    }
+}
+
+/// An optional active-account hint supplied by an external tool.
+///
+/// The app does not require or create this file. Standard Claude Code setups
+/// continue to use `active_claude_emails`.
+fn external_active_claude_emails() -> HashSet<String> {
+    let path = config::config_dir().join("claude-active-account.json");
+    let Ok(data) = config::read_json(&path) else {
+        return HashSet::new();
+    };
+    let updated_at = data
+        .get("updated_at")
+        .and_then(|value| value.as_i64())
+        .unwrap_or_default();
+    let age = now_epoch().saturating_sub(updated_at);
+    if updated_at <= 0 || age > CLAUDE_ACTIVITY_HINT_SECONDS as i64 {
+        return HashSet::new();
+    }
+    let email = data
+        .get("email")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    if email.is_empty() {
+        HashSet::new()
+    } else {
+        HashSet::from([email])
     }
 }
 

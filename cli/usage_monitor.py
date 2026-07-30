@@ -52,6 +52,7 @@ CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_SESSION_SECONDS = 5 * 3600  # the 5h quota window, also the standby horizon
 CLAUDE_CONFIG_TIE_SECONDS = 600  # environments this close apart are both in use
+CLAUDE_ACTIVE_ACCOUNT_FILE = CONFIG_DIR / "claude-active-account.json"
 
 
 @dataclass
@@ -734,13 +735,30 @@ def claude_active_emails() -> set[str]:
     return {email for stamp, email in found if stamp >= newest - CLAUDE_CONFIG_TIE_SECONDS}
 
 
+def external_active_claude_emails() -> set[str]:
+    """An optional active-account hint supplied by an external tool.
+
+    The app does not require or create this file. Standard Claude Code setups
+    keep using `claude_active_emails`.
+    """
+    try:
+        hint = read_json(CLAUDE_ACTIVE_ACCOUNT_FILE)
+        updated_at = int(hint.get("updated_at") or 0)
+        email = str(hint.get("email") or "").strip().lower()
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return set()
+    if not email or updated_at <= 0 or time.time() - updated_at > CLAUDE_SESSION_SECONDS:
+        return set()
+    return {email}
+
+
 def mark_standby(results: list[Provider]) -> None:
     """Flag the Claude accounts that are not the one in use.
 
-    Primary signal: the account the CLI is logged into, read from the most
-    recently touched `.claude.json` across environments. A single copy of that
-    file is not enough — Windows and WSL keep separate ones, and looking at only
-    the local side leaves the account of the *other* side wrongly unflagged.
+    An optional external activity hint takes precedence when present. This lets
+    launchers or routers report the upstream account without making them a
+    dependency of the app. Without a fresh hint, use the most recently touched
+    `.claude.json` across environments.
     When no `.claude.json` names a known account (usage driven from claude.ai or
     the desktop app), fall back to the session window: an account whose 5h
     window already rolled over cannot be the one burning quota. If nothing
@@ -749,7 +767,7 @@ def mark_standby(results: list[Provider]) -> None:
     claude = [item for item in results if item.name == "Claude" and item.error is None]
     if len(claude) < 2:
         return
-    active_emails = claude_active_emails()
+    active_emails = external_active_claude_emails() or claude_active_emails()
     in_use = {item.account for item in claude if item.email.lower() in active_emails}
     if not in_use:
         in_use = {item.account for item in claude if session_active(item)}
