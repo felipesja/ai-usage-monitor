@@ -353,6 +353,25 @@ def rpc_read(proc: subprocess.Popen[str], messages: queue.Queue[dict[str, Any]],
 
 
 def codex_bin() -> str:
+    if os.name == "nt":
+        # Some npm versions install only the extensionless POSIX shim and
+        # codex.ps1 in the global bin directory. Prefer a regular executable
+        # from PATH, then the native binary shipped by @openai/codex.
+        found = shutil.which("codex.exe")
+        if found:
+            return found
+        npm_dir = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "npm"
+        cmd = npm_dir / "codex.cmd"
+        if cmd.is_file():
+            return str(cmd)
+        openai = npm_dir / "node_modules" / "@openai"
+        package_roots = [openai / "codex" / "node_modules" / "@openai", openai]
+        for root in package_roots:
+            candidates = sorted(root.glob("codex-win32-*/vendor/**/bin/codex.exe"), reverse=True)
+            if candidates:
+                return str(candidates[0])
+        return "codex.exe"
+
     # On WSL the nvm PATH is not loaded in non-interactive shells, and the
     # Windows PATH offers an npm shim from /mnt/c that cannot run there —
     # only accept `which` if it points at a native Linux binary.

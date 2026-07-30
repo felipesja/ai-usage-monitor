@@ -91,18 +91,25 @@ pub fn collect() -> Provider {
     provider
 }
 
-/// The npm shim on Windows (`codex.cmd`) or the binary on PATH. A `.cmd` can't
-/// be executed directly by `Command`; it has to go through `cmd.exe /C`.
+/// The npm shim on Windows (`codex.cmd`) or the native binary installed inside
+/// the npm package. Recent npm versions can leave only `codex`/`codex.ps1` in
+/// the global bin directory, neither of which a GUI process can execute
+/// reliably with its reduced PATH.
 fn codex_command() -> Result<Command, String> {
     #[cfg(windows)]
     {
-        let shim = home().join("AppData").join("Roaming").join("npm").join("codex.cmd");
+        let npm_dir = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join("AppData").join("Roaming"))
+            .join("npm");
+        let shim = npm_dir.join("codex.cmd");
         if shim.exists() {
             let mut command = Command::new("cmd.exe");
             command.arg("/C").arg(shim);
             return Ok(command);
         }
-        Ok(Command::new("codex.exe"))
+        let binary = find_windows_codex(&npm_dir).unwrap_or_else(|| PathBuf::from("codex.exe"));
+        Ok(Command::new(binary))
     }
     #[cfg(not(windows))]
     {
@@ -117,6 +124,60 @@ fn codex_command() -> Result<Command, String> {
         }
         Ok(command)
     }
+}
+
+/// Find the native executable shipped by `@openai/codex`. npm may install the
+/// platform package either beside `codex` or nested below it.
+#[cfg(windows)]
+fn find_windows_codex(npm_dir: &std::path::Path) -> Option<PathBuf> {
+    if let Some(found) = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("codex.exe"))
+            .find(|candidate| candidate.is_file())
+    }) {
+        return Some(found);
+    }
+
+    let openai = npm_dir.join("node_modules").join("@openai");
+    let package_roots = [openai.clone(), openai.join("codex").join("node_modules").join("@openai")];
+    for root in package_roots {
+        let Ok(entries) = std::fs::read_dir(root) else { continue };
+        let mut packages: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("codex-win32-")
+            })
+            .map(|entry| entry.path())
+            .collect();
+        packages.sort();
+        packages.reverse();
+        for package in packages {
+            if let Some(found) = find_codex_exe(&package) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn find_codex_exe(root: &std::path::Path) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if entry.file_name().to_string_lossy().eq_ignore_ascii_case("codex.exe") {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// `codex` from PATH, then the install locations a GUI app's minimal launchd
