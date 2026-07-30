@@ -54,7 +54,10 @@ function checkAlerts(providers) {
       if (meter.percent == null) continue;
       // reset_at is kept out of the key because some providers jitter it
       // between fetches.
-      const key = `${provider.email || provider.account}|${meter.label}`;
+      // Provider is part of the identity: the same account can use Claude and
+      // Codex, and both expose meters such as "Weekly". Without it, a lower
+      // meter from one provider can re-arm an alert fired by the other.
+      const key = `${provider.name}|${provider.email || provider.account}|${meter.label}`;
       let mark = firedLevels.get(key) || 0;
       // Re-arm: forget any announced level the meter dropped clearly below
       // (window renewed, or usage genuinely fell). A real reset lands at ~0,
