@@ -88,9 +88,9 @@
     /* Section titles reuse .provider-name.<Name> for the brand colors. */
     .acct-title { display: block; font-weight: 700; margin-bottom: 4px; }
     .acct-row { display: flex; gap: 8px; align-items: baseline; padding: 2px 0 2px 10px; }
-    .acct-row .who { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .acct-row .who { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; }
     .acct-row .meta { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
-    .acct-act { cursor: pointer; white-space: nowrap; }
+    .acct-act { cursor: pointer; white-space: nowrap; font-size: 10.5px; }
     .acct-act.add { color: var(--green); }
     .acct-act.add:hover { color: var(--text); }
     .acct-act.rm { color: var(--dim); }
@@ -101,6 +101,7 @@
     .acct-msg.err { color: var(--red); }
     .acct-msg.ok { color: var(--green); }
     .acct-form { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 0 10px; }
+    .acct-form-actions { display: flex; gap: 10px; align-items: center; }
     .acct-form label { color: var(--muted); font-size: 10.5px; display: flex; gap: 6px; align-items: center; }
     .acct-input, .acct-select {
       background: rgba(255, 255, 255, 0.06);
@@ -114,8 +115,9 @@
       min-width: 0;
     }
     .acct-select option { background: #1b1d1e; }
-    .acct-save { color: var(--cyan); cursor: pointer; align-self: flex-start; }
+    .acct-save { color: var(--cyan); cursor: pointer; align-self: flex-start; font-size: 10.5px; }
     .acct-save:hover { color: var(--text); }
+    .acct-save.disabled { color: var(--dim); pointer-events: none; }
   </style>
 </head>
 <body data-tauri-drag-region>

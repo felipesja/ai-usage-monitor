@@ -26,7 +26,14 @@ pub struct Candidate {
 #[derive(Serialize)]
 pub struct Detection {
     pub claude: Vec<Candidate>,
-    pub cursor_configured: bool,
+    pub cursor: CursorDetection,
+}
+
+#[derive(Serialize)]
+pub struct CursorDetection {
+    pub configured: bool,
+    pub method: Option<String>,
+    pub email: Option<String>,
 }
 
 /// Credential sources found on the machine. Listing is metadata-only — secrets
@@ -41,9 +48,20 @@ pub fn detect() -> Detection {
     #[cfg(target_os = "macos")]
     claude_candidates.extend(keychain_candidates(&keychain));
     claude_candidates.extend(file_candidates(&keychain));
-    Detection {
-        claude: claude_candidates,
-        cursor_configured: cursor_config().exists(),
+    Detection { claude: claude_candidates, cursor: detect_cursor() }
+}
+
+/// Non-secret Cursor metadata for prefilling the account editor. The stored
+/// key/cookie deliberately never crosses the backend boundary.
+fn detect_cursor() -> CursorDetection {
+    let path = cursor_config();
+    let Ok(config) = read_json(&path) else {
+        return CursorDetection { configured: path.exists(), method: None, email: None };
+    };
+    CursorDetection {
+        configured: true,
+        method: config.get("method").and_then(Value::as_str).map(str::to_string),
+        email: config.get("email").and_then(Value::as_str).map(str::to_string),
     }
 }
 

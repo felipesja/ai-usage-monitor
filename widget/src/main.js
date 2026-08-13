@@ -271,7 +271,7 @@ async function renderAccounts() {
   const root = document.getElementById("accounts");
   root.replaceChildren();
 
-  let detection = { claude: [], cursor_configured: false };
+  let detection = { claude: [], cursor: { configured: false, method: null, email: null } };
   try {
     detection = JSON.parse(await invoke("detect_accounts"));
   } catch (error) {
@@ -364,42 +364,36 @@ async function renderAccounts() {
   const cursor = document.createElement("div");
   cursor.className = "acct-section";
   cursor.appendChild(acctSpan("acct-title provider-name Cursor", "Cursor"));
-  if (detection.cursor_configured) {
-    const remove = acctSpan("acct-act rm", "✕ remove");
-    remove.addEventListener("click", async () => {
-      try {
-        await invoke("remove_cursor_config");
-        setAccountsMsg("Cursor config removed", "ok");
-        await refresh();
-        renderAccounts();
-      } catch (error) {
-        setAccountsMsg(String(error), "err");
-      }
-    });
-    cursor.appendChild(acctRow(acctSpan("who", "configured"), remove));
-  } else {
+  const cursorConfig = detection.cursor || { configured: false, method: null, email: null };
+
+  function showCursorForm() {
+    cursor.replaceChildren(acctSpan("acct-title provider-name Cursor", "Cursor"));
     const form = document.createElement("div");
     form.className = "acct-form";
     const method = document.createElement("select");
     method.className = "acct-select";
     method.append(new Option("Admin API key", "admin_key"), new Option("Dashboard cookie", "dashboard_cookie"));
+    if (["admin_key", "dashboard_cookie"].includes(cursorConfig.method)) method.value = cursorConfig.method;
     const secret = document.createElement("input");
     secret.type = "password";
     secret.className = "acct-input";
-    secret.placeholder = "key_…";
     const email = document.createElement("input");
     email.type = "text";
     email.className = "acct-input";
     email.placeholder = "your-email@company.com";
+    email.value = cursorConfig.email || "";
     const emailLabel = document.createElement("label");
     emailLabel.append("email", email);
-    method.addEventListener("change", () => {
+    const syncMethod = () => {
       const admin = method.value === "admin_key";
       secret.placeholder = admin ? "key_…" : "WorkosCursorSessionToken";
       emailLabel.style.display = admin ? "" : "none";
-    });
+    };
+    method.addEventListener("change", syncMethod);
+    syncMethod();
     const save = acctSpan("acct-save", "save");
     save.addEventListener("click", async () => {
+      save.classList.add("disabled");
       try {
         await invoke("save_cursor_config", {
           method: method.value,
@@ -411,14 +405,43 @@ async function renderAccounts() {
         renderAccounts();
       } catch (error) {
         setAccountsMsg(String(error), "err");
+        save.classList.remove("disabled");
       }
     });
+    const actions = document.createElement("div");
+    actions.className = "acct-form-actions";
+    actions.appendChild(save);
+    if (cursorConfig.configured) {
+      const cancel = acctSpan("acct-act rm", "cancel");
+      cancel.addEventListener("click", () => renderAccounts());
+      actions.appendChild(cancel);
+    }
     const methodLabel = document.createElement("label");
     methodLabel.append("method", method);
     const secretLabel = document.createElement("label");
     secretLabel.append("secret", secret);
-    form.append(methodLabel, secretLabel, emailLabel, save);
+    form.append(methodLabel, secretLabel, emailLabel, actions);
     cursor.appendChild(form);
+    secret.focus();
+  }
+
+  if (cursorConfig.configured) {
+    const edit = acctSpan("acct-act add", "edit");
+    edit.addEventListener("click", showCursorForm);
+    const remove = acctSpan("acct-act rm", "✕ remove");
+    remove.addEventListener("click", async () => {
+      try {
+        await invoke("remove_cursor_config");
+        setAccountsMsg("Cursor config removed", "ok");
+        await refresh();
+        renderAccounts();
+      } catch (error) {
+        setAccountsMsg(String(error), "err");
+      }
+    });
+    cursor.appendChild(acctRow(acctSpan("who", "configured"), edit, remove));
+  } else {
+    showCursorForm();
   }
   root.appendChild(cursor);
 
