@@ -138,6 +138,15 @@ fn find_windows_codex(npm_dir: &std::path::Path) -> Option<PathBuf> {
         return Some(found);
     }
 
+    // The standalone Windows installer puts the binary outside npm's global
+    // directory. A GUI launched before the installer ran can also have a
+    // stale PATH, so check the install locations directly.
+    for candidate in native_windows_codex_candidates() {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
     let openai = npm_dir.join("node_modules").join("@openai");
     let package_roots = [openai.clone(), openai.join("codex").join("node_modules").join("@openai")];
     for root in package_roots {
@@ -161,6 +170,33 @@ fn find_windows_codex(npm_dir: &std::path::Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(windows)]
+fn native_windows_codex_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(local_app_data)
+                .join("Programs")
+                .join("OpenAI")
+                .join("Codex")
+                .join("bin")
+                .join("codex.exe"),
+        );
+    }
+    for variable in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(program_files) = std::env::var_os(variable) {
+            candidates.push(
+                PathBuf::from(program_files)
+                    .join("OpenAI")
+                    .join("Codex")
+                    .join("bin")
+                    .join("codex.exe"),
+            );
+        }
+    }
+    candidates
 }
 
 #[cfg(windows)]
