@@ -5,9 +5,10 @@
 
 pub mod config;
 pub mod claude;
-mod codex;
+pub mod codex;
 mod cursor;
 mod date;
+pub mod grok;
 
 use std::collections::HashSet;
 use std::fs;
@@ -96,12 +97,14 @@ pub fn collect_all() -> Vec<Provider> {
             .collect();
         let codex = scope.spawn(codex::collect);
         let cursor = scope.spawn(cursor::collect);
+        let grok = scope.spawn(grok::collect);
 
         for handle in claude_handles {
             providers.push(handle.join().expect("Claude collector thread panicked"));
         }
         providers.push(codex.join().expect("Codex collector thread panicked"));
         providers.push(cursor.join().expect("Cursor collector thread panicked"));
+        providers.push(grok.join().expect("Grok collector thread panicked"));
     });
 
     mark_standby(&mut providers);

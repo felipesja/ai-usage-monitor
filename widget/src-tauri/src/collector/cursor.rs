@@ -68,27 +68,18 @@ fn by_cookie(config: &Value) -> Result<Provider, String> {
         .and_then(|usage| usage.get("plan"))
         .cloned()
         .unwrap_or(Value::Null);
-    let raw_used = plan.get("used").and_then(Value::as_f64).unwrap_or(0.0);
-    let raw_limit = plan.get("limit").and_then(Value::as_f64).unwrap_or(0.0);
-    let percent = if raw_limit > 0.0 {
-        Some(raw_used * 100.0 / raw_limit)
-    } else {
-        None
-    };
+    let (used, total, included) = plan_usage(&plan);
+    let percent = if total > 0.0 { Some(used * 100.0 / total) } else { None };
 
-    // The team dashboard shows request units at 1/4 of the internal values
-    // returned by usage-summary (576/2000 -> 144/500).
-    let scale = if data.get("limitType").and_then(Value::as_str) == Some("team") {
-        4.0
-    } else {
-        1.0
-    };
     let billing_end = data.get("billingCycleEnd").and_then(Value::as_str).map(str::to_string);
     let mut usage_meter = Meter::new("Usage", percent, billing_end.clone());
-    // Round up: a partially consumed unit still counts as used.
-    usage_meter.used = Some(display_number((raw_used / scale).ceil()));
-    usage_meter.limit = Some(display_number(raw_limit / scale));
+    usage_meter.used = Some(display_money(used));
+    usage_meter.limit = Some(display_money(total));
     provider.meters.push(usage_meter);
+
+    if used - included > 0.0 {
+        provider.details.push(format!("Extra usage: {}", display_money(used - included)));
+    }
 
     if let Some(auto) = plan.get("autoPercentUsed").and_then(Value::as_f64) {
         if auto != 0.0 {
@@ -164,12 +155,75 @@ fn by_admin_key(config: &Value) -> Result<Provider, String> {
     Ok(provider)
 }
 
-/// Integer with no decimals when exact (matches Python's `display_number`).
-fn display_number(value: f64) -> String {
-    if value.fract() == 0.0 {
-        format!("{value:.0}")
+/// Cursor's `plan.used`/`limit` saturate at the included allowance, so an
+/// account with bonus credits sits at a permanent 100%. `breakdown` carries the
+/// real balance (included + bonus) and `totalPercentUsed` the real share of it.
+/// Returns (used_cents, total_cents, included_cents); falls back to the plain
+/// used/limit pair when the payload has no breakdown.
+fn plan_usage(plan: &Value) -> (f64, f64, f64) {
+    let breakdown = plan.get("breakdown");
+    let included = breakdown
+        .and_then(|value| value.get("included"))
+        .and_then(Value::as_f64)
+        .or_else(|| plan.get("limit").and_then(Value::as_f64))
+        .unwrap_or(0.0);
+    let total = breakdown
+        .and_then(|value| value.get("total"))
+        .and_then(Value::as_f64)
+        .unwrap_or(included);
+    let percent = plan.get("totalPercentUsed").and_then(Value::as_f64);
+    let used = match percent {
+        Some(percent) if total > 0.0 => percent / 100.0 * total,
+        _ => plan.get("used").and_then(Value::as_f64).unwrap_or(0.0),
+    };
+    (used.min(total), total, included)
+}
+
+/// Cursor's included-usage values are USD cents.
+fn display_money(cents: f64) -> String {
+    let formatted = if cents.fract() == 0.0 && cents % 100.0 == 0.0 {
+        format!("${:.0}", cents / 100.0)
     } else {
-        format!("{value}")
+        format!("${:.2}", cents / 100.0)
+    };
+    formatted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{display_money, plan_usage};
+    use serde_json::json;
+
+    #[test]
+    fn formats_included_usage_cents_as_dollars() {
+        assert_eq!(display_money(35.0), "$0.35");
+        assert_eq!(display_money(2_000.0), "$20");
+    }
+
+    #[test]
+    fn scales_the_real_balance_by_the_total_percent_used() {
+        let plan = json!({
+            "used": 2000,
+            "limit": 2000,
+            "remaining": 0,
+            "breakdown": { "included": 2000, "bonus": 5252, "total": 7252 },
+            "autoPercentUsed": 0,
+            "apiPercentUsed": 90.65,
+            "totalPercentUsed": 90.65
+        });
+        let (used, total, included) = plan_usage(&plan);
+        assert!((used - 6_573.938).abs() < 0.01, "used = {used}");
+        assert!((total - 7_252.0).abs() < 0.01, "total = {total}");
+        assert!((included - 2_000.0).abs() < 0.01, "included = {included}");
+    }
+
+    #[test]
+    fn falls_back_to_used_and_limit_without_a_breakdown() {
+        let plan = json!({ "used": 1234, "limit": 2000 });
+        let (used, total, included) = plan_usage(&plan);
+        assert!((used - 1_234.0).abs() < 0.01, "used = {used}");
+        assert!((total - 2_000.0).abs() < 0.01, "total = {total}");
+        assert!((included - 2_000.0).abs() < 0.01, "included = {included}");
     }
 }
 

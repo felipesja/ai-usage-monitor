@@ -70,6 +70,20 @@ fn remove_cursor_config() -> Result<(), String> {
     accounts::remove_cursor()
 }
 
+/// Logs the Codex CLI out (`codex logout`) — a subprocess call, unlike the
+/// Claude/Cursor removals which just delete a file this app owns.
+#[tauri::command]
+async fn remove_codex_account() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(collector::codex::logout).await.map_err(|err| err.to_string())?
+}
+
+/// Logs the Grok CLI out (`grok logout`). Falls back to deleting `auth.json`
+/// when the binary is not on PATH.
+#[tauri::command]
+async fn remove_grok_account() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(collector::grok::logout).await.map_err(|err| err.to_string())?
+}
+
 const MARGIN: i32 = 12;
 const TOGGLE_DEBOUNCE: Duration = Duration::from_millis(300);
 
@@ -268,7 +282,9 @@ fn main() {
             add_claude_account,
             remove_claude_account,
             save_cursor_config,
-            remove_cursor_config
+            remove_cursor_config,
+            remove_codex_account,
+            remove_grok_account
         ])
         .on_window_event(|window, event| {
             // Alt+F4 (and any close) becomes hide-to-tray.

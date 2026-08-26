@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Terminal dashboard for Claude, Codex, and Cursor subscription usage."""
+"""Terminal dashboard for Claude, Codex, Cursor, and Grok subscription usage."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import concurrent.futures
 import datetime as dt
 import getpass
 import json
-import math
 import os
 import queue
 import re
@@ -21,6 +20,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -53,6 +53,11 @@ CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_SESSION_SECONDS = 5 * 3600  # the 5h quota window, also the standby horizon
 CLAUDE_CONFIG_TIE_SECONDS = 600  # environments this close apart are both in use
 CLAUDE_ACTIVE_ACCOUNT_FILE = CONFIG_DIR / "claude-active-account.json"
+GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
+GROK_TOKEN_URL = "https://auth.x.ai/oauth2/token"
+# Refresh the Grok CLI token when under this many seconds remain, matching Claude.
+GROK_REFRESH_BUFFER = 120
 
 
 @dataclass
@@ -147,6 +152,36 @@ def request_json(
     if body is not None:
         all_headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, data=data, headers=all_headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        message = f"HTTP {exc.code}"
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+            message += f": {payload.get('error', payload.get('message', 'API failure'))}"
+        except Exception:
+            pass
+        raise RuntimeError(message) from None
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"network unavailable: {exc.reason}") from None
+
+
+def request_form(
+    url: str,
+    body: dict[str, str],
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float = 30,
+) -> dict[str, Any]:
+    """POST application/x-www-form-urlencoded — OIDC token refresh."""
+    data = urllib.parse.urlencode(body).encode()
+    all_headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        **(headers or {}),
+    }
+    request = urllib.request.Request(url, data=data, headers=all_headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -310,6 +345,30 @@ def money(minor: float, currency: str, places: int) -> str:
     """Minor units (`used_credits`, `monthly_limit`) as a readable amount."""
     symbol = CURRENCY_SYMBOLS.get(currency.upper()) or (f"{currency.upper()} " if currency else "")
     return f"{symbol}{minor / (10 ** places):.{places}f}"
+
+
+def cursor_money(cents: float) -> str:
+    """Format Cursor's included-usage cents as dollars."""
+    if cents.is_integer() and cents % 100 == 0:
+        return f"${cents / 100:.0f}"
+    return f"${cents / 100:.2f}"
+
+
+def cursor_plan_usage(plan: dict[str, Any]) -> tuple[float, float, float]:
+    """Cursor's `plan.used`/`limit` saturate at the included allowance, so an
+    account with bonus credits sits at a permanent 100%. `breakdown` carries the
+    real balance (included + bonus) and `totalPercentUsed` the real share of it.
+    Returns (used_cents, total_cents, included_cents); falls back to the plain
+    used/limit pair when the payload has no breakdown."""
+    breakdown = plan.get("breakdown") or {}
+    included = float(breakdown.get("included", plan.get("limit", 0)) or 0)
+    total = float(breakdown.get("total", included) or 0)
+    percent = plan.get("totalPercentUsed")
+    if percent is not None and total > 0:
+        used = float(percent) / 100 * total
+    else:
+        used = float(plan.get("used", 0) or 0)
+    return min(used, total), total, included
 
 
 def extra_usage_detail(extra: dict[str, Any]) -> str:
@@ -540,29 +599,20 @@ def collect_cursor() -> Provider:
                 pass
             result = Provider("Cursor", "Business", str(data.get("membershipType", "Team")).title(), email)
             plan = (data.get("individualUsage") or {}).get("plan") or {}
-            raw_used = float(plan.get("used", 0))
-            raw_limit = float(plan.get("limit", 0))
-            percent = raw_used * 100 / raw_limit if raw_limit else None
-
-            # The team dashboard presents included-request units at 1/4 of the
-            # internal values returned by usage-summary (576/2000 -> 144/500).
-            request_scale = 4 if data.get("limitType") == "team" else 1
-            # Round up: a partially consumed unit still counts as used.
-            request_used = float(math.ceil(raw_used / request_scale))
-            request_limit = raw_limit / request_scale
-
-            def display_number(value: float) -> str:
-                return str(int(value)) if value.is_integer() else f"{value:g}"
+            used, total, included = cursor_plan_usage(plan)
+            percent = used * 100 / total if total else None
 
             result.meters.append(
                 Meter(
                     "Usage",
                     percent,
                     data.get("billingCycleEnd"),
-                    display_number(request_used),
-                    display_number(request_limit),
+                    cursor_money(used),
+                    cursor_money(total),
                 )
             )
+            if used - included > 0:
+                result.details.append(f"Extra usage: {cursor_money(used - included)}")
             auto_percent = plan.get("autoPercentUsed")
             if auto_percent:
                 result.meters.append(Meter("Auto usage", float(auto_percent), data.get("billingCycleEnd")))
@@ -595,6 +645,164 @@ def collect_cursor() -> Provider:
         return result
     except Exception as exc:
         return Provider("Cursor", "Business", error=str(exc))
+
+
+def grok_home() -> Path:
+    override = os.environ.get("GROK_HOME")
+    return Path(override) if override else Path.home() / ".grok"
+
+
+def grok_auth_path() -> Path:
+    return grok_home() / "auth.json"
+
+
+def grok_session(data: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The most recently expiring Grok CLI session in auth.json."""
+    best: tuple[str, dict[str, Any], float] | None = None
+    for key, account in data.items():
+        if not isinstance(account, dict) or not account.get("key"):
+            continue
+        expires = grok_expires_epoch(account) or 0.0
+        if best is None or expires >= best[2]:
+            best = (key, account, expires)
+    if best is None:
+        raise RuntimeError("no local session found")
+    return best[0], best[1]
+
+
+def grok_expires_epoch(account: dict[str, Any]) -> float | None:
+    text = account.get("expires_at")
+    if not text:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def grok_numeric(value: Any) -> float:
+    if isinstance(value, dict):
+        value = value.get("val")
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def refresh_grok(path: Path, data: dict[str, Any], session_key: str, *, force: bool = False) -> dict[str, Any]:
+    """Renew the Grok CLI access token when it is close to expiry, writing it back.
+
+    The file belongs to the Grok CLI; persisting the rotated pair is required
+    because OIDC refresh tokens are single-use — keeping the old one would
+    lock the CLI out of the next refresh.
+    """
+    account = data[session_key]
+    expires = grok_expires_epoch(account)
+    if not force and expires is not None and expires > time.time() + GROK_REFRESH_BUFFER:
+        return data
+    refresh_token = account.get("refresh_token")
+    client_id = account.get("oidc_client_id")
+    if not refresh_token or not client_id:
+        if expires is not None and expires <= time.time():
+            raise RuntimeError("Grok session expired; run grok login")
+        return data
+    response = request_form(
+        GROK_TOKEN_URL,
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": str(refresh_token),
+            "client_id": str(client_id),
+        },
+        headers={"User-Agent": APP},
+    )
+    access = response.get("access_token")
+    if not access:
+        raise RuntimeError("Grok token refresh returned no access_token")
+    account["key"] = access
+    if response.get("refresh_token"):
+        account["refresh_token"] = response["refresh_token"]
+    expires_in = int(response.get("expires_in") or 28_800)
+    account["expires_at"] = (
+        dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=expires_in)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    data[session_key] = account
+    write_private_json(path, data)
+    return data
+
+
+def grok_from_billing(config: dict[str, Any], email: str, plan: str) -> Provider:
+    result = Provider("Grok", "SuperGrok", plan, email)
+    period = config.get("currentPeriod") or {}
+    period_type = str(period.get("type") or "")
+    if "WEEKLY" in period_type.upper():
+        label = "Weekly"
+    elif "MONTHLY" in period_type.upper():
+        label = "Monthly"
+    else:
+        label = "Credits"
+
+    percent = config.get("creditUsagePercent")
+    if percent is None:
+        for item in config.get("productUsage") or []:
+            if str(item.get("product") or "") == "GrokBuild" and item.get("usagePercent") is not None:
+                percent = item["usagePercent"]
+                break
+    if percent is None:
+        cap = grok_numeric(config.get("onDemandCap"))
+        used = grok_numeric(config.get("onDemandUsed"))
+        if cap:
+            percent = used / cap * 100
+        elif period:
+            percent = 0.0
+
+    reset = period.get("end") or config.get("billingPeriodEnd")
+    if percent is not None:
+        result.meters.append(Meter(label, float(percent), reset))
+
+    on_used = grok_numeric(config.get("onDemandUsed"))
+    on_cap = grok_numeric(config.get("onDemandCap"))
+    if on_used:
+        result.details.append(f"On demand: {on_used:g}" + (f" / {on_cap:g}" if on_cap else ""))
+    prepaid = grok_numeric(config.get("prepaidBalance"))
+    if prepaid:
+        result.details.append(f"Prepaid: {prepaid:g}")
+    return result
+
+
+def collect_grok() -> Provider:
+    path = grok_auth_path()
+    if not path.exists():
+        return Provider("Grok", "SuperGrok", error="no local session found")
+    try:
+        data = read_json(path)
+        session_key, _ = grok_session(data)
+        data = refresh_grok(path, data, session_key)
+        account = data[session_key]
+        token = str(account["key"])
+        email = str(account.get("email") or "")
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "x-xai-token-auth": "xai-grok-cli",
+            "User-Agent": APP,
+        }
+        try:
+            billing = request_json(GROK_BILLING_URL, headers=headers)
+        except RuntimeError as exc:
+            if "HTTP 401" not in str(exc):
+                raise
+            data = refresh_grok(path, data, session_key, force=True)
+            headers["Authorization"] = f"Bearer {data[session_key]['key']}"
+            billing = request_json(GROK_BILLING_URL, headers=headers)
+        plan = "SuperGrok"
+        try:
+            settings = request_json(GROK_SETTINGS_URL, headers=headers)
+            plan = str(settings.get("subscription_tier_display") or plan)
+        except Exception:
+            pass
+        return grok_from_billing(billing.get("config") or billing, email, plan)
+    except Exception as exc:
+        return Provider("Grok", "SuperGrok", error=str(exc))
 
 
 def session_active(provider: Provider) -> bool:
@@ -779,14 +987,22 @@ def mark_standby(results: list[Provider]) -> None:
 
 def collect_all() -> list[Provider]:
     claude_profiles = sorted(path.parent for path in CLAUDE_DIR.glob("*/.credentials.json")) if CLAUDE_DIR.exists() else []
-    jobs = [("claude", profile) for profile in claude_profiles] + [("codex", None), ("cursor", None)]
+    jobs = [("claude", profile) for profile in claude_profiles] + [
+        ("codex", None),
+        ("cursor", None),
+        ("grok", None),
+    ]
 
     def run(job: tuple[str, Path | None]) -> Provider:
         kind, path = job
         if kind == "claude":
             assert path is not None
             return collect_claude(path)
-        return collect_codex() if kind == "codex" else collect_cursor()
+        if kind == "codex":
+            return collect_codex()
+        if kind == "cursor":
+            return collect_cursor()
+        return collect_grok()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(jobs))) as pool:
         results = list(pool.map(run, jobs))
@@ -955,6 +1171,7 @@ def tui_colors() -> dict[str, int]:
             "claude": 173 if rich else curses.COLOR_RED,
             "openai": 36 if rich else curses.COLOR_GREEN,
             "cursor": 252 if rich else curses.COLOR_WHITE,
+            "grok": 180 if rich else curses.COLOR_YELLOW,
             "amber": 214 if rich else curses.COLOR_YELLOW,
             "green": 78 if rich else curses.COLOR_GREEN,
             "red": 203 if rich else curses.COLOR_RED,
@@ -966,7 +1183,7 @@ def tui_colors() -> dict[str, int]:
             curses.init_pair(number, color, -1)
         return {name: curses.color_pair(number) for number, name in enumerate(palette, start=1)}
     except curses.error:
-        return {name: 0 for name in ("cyan", "claude", "openai", "cursor", "amber", "green", "red", "muted", "dim", "text")}
+        return {name: 0 for name in ("cyan", "claude", "openai", "cursor", "grok", "amber", "green", "red", "muted", "dim", "text")}
 
 
 def tui_add(screen: Any, y: int, x: int, value: str, width: int, attr: int = 0) -> None:
@@ -994,7 +1211,7 @@ def tui_bar(percent: float | None, width: int) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-PROVIDER_COLOR = {"Claude": "claude", "Codex": "openai", "Cursor": "cursor"}
+PROVIDER_COLOR = {"Claude": "claude", "Codex": "openai", "Cursor": "cursor", "Grok": "grok"}
 
 
 def provider_accent(index: int, provider: Provider, colors: dict[str, int]) -> int:
@@ -1249,6 +1466,7 @@ def doctor() -> None:
     print(f"Claude: {len(list(CLAUDE_DIR.glob('*/.credentials.json'))) if CLAUDE_DIR.exists() else 0} profile(s)")
     print(f"Codex CLI: {'ok' if shutil.which('codex') else 'not found'}")
     print(f"Cursor: {'configured' if CURSOR_CONFIG.exists() else 'not configured'}")
+    print(f"Grok: {'logged in' if grok_auth_path().exists() else 'no local session'}")
     print(f"Alerts: {', '.join(f'{t}%' for t in load_alert_thresholds())} ({CONFIG_FILE.name})")
 
 

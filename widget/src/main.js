@@ -11,7 +11,7 @@ const REARM_MARGIN = 5;
 // Highest threshold already announced per meter (a high-water mark).
 const firedLevels = new Map();
 
-const ACCENT = { Claude: "var(--claude)", Codex: "var(--openai)", Cursor: "var(--cursor)" };
+const ACCENT = { Claude: "var(--claude)", Codex: "var(--openai)", Cursor: "var(--cursor)", Grok: "var(--grok)" };
 
 function resetRemaining(value) {
   if (!value) return "";
@@ -88,14 +88,14 @@ async function loadAlertThresholds() {
 }
 
 // Providers that were never set up on this machine render as noise (Codex
-// without the CLI installed, Cursor without a key). Keep them out of the
-// panel — the accounts view (a) still reports their status. A provider that
-// WAS set up and then breaks keeps showing its error.
+// or Grok without a local session, Cursor without a key). Keep them out of
+// the panel — the accounts view (a) still reports their status. A provider
+// that WAS set up and then breaks keeps showing its error.
 function isUnconfigured(provider) {
   if (!provider.error || provider.meters?.length) return false;
   if (provider.name === "Cursor") return provider.error.startsWith("set it up with");
-  if (provider.name === "Codex") {
-    return provider.error.includes("did not start") && provider.error.includes("no local session found");
+  if (provider.name === "Codex" || provider.name === "Grok") {
+    return provider.error.includes("no local session found");
   }
   return false;
 }
@@ -158,8 +158,13 @@ function render(providers) {
 
       const label = document.createElement("span");
       label.className = "label";
-      label.textContent =
-        meter.used != null && meter.limit != null ? `${meter.label} ${meter.used}/${meter.limit}` : meter.label;
+      label.textContent = meter.label;
+      if (meter.used != null && meter.limit != null) {
+        const amount = document.createElement("span");
+        amount.className = "amount";
+        amount.textContent = ` ${meter.used}/${meter.limit}`;
+        label.appendChild(amount);
+      }
 
       const pct = document.createElement("span");
       pct.className = "pct";
@@ -345,20 +350,76 @@ async function renderAccounts() {
   }
   root.appendChild(claude);
 
-  // Codex needs no registration; report what the collector sees.
+  // Codex needs no registration; report what the collector sees. Unlike
+  // Claude/Cursor, there is no credential file this app owns — "remove"
+  // shells out to `codex logout`, the CLI's own command.
   const codex = document.createElement("div");
   codex.className = "acct-section";
   codex.appendChild(acctSpan("acct-title provider-name Codex", "Codex"));
   const codexProvider = lastProviders.find((p) => p.name === "Codex");
-  codex.appendChild(
-    acctSpan(
-      "acct-hint",
-      codexProvider && !codexProvider.error
-        ? `auto-detected · ${codexProvider.email || "logged in"}`
-        : "auto-detected via the Codex CLI — none found",
-    ),
+  const codexDetected = Boolean(codexProvider);
+  const codexHint = acctSpan(
+    "acct-hint",
+    codexProvider && !codexProvider.error
+      ? `auto-detected · ${codexProvider.email || "logged in"}`
+      : "auto-detected via the Codex CLI — none found",
   );
+  if (codexDetected) {
+    const remove = acctSpan("acct-act rm", "✕ remove");
+    remove.addEventListener("click", async () => {
+      remove.classList.add("disabled");
+      remove.textContent = "logging out…";
+      try {
+        await invoke("remove_codex_account");
+        setAccountsMsg("logged out of the Codex CLI", "ok");
+        await refresh();
+        renderAccounts();
+      } catch (error) {
+        setAccountsMsg(String(error), "err");
+        remove.classList.remove("disabled");
+        remove.textContent = "✕ remove";
+      }
+    });
+    codex.appendChild(acctRow(codexHint, remove));
+  } else {
+    codex.appendChild(codexHint);
+  }
   root.appendChild(codex);
+
+  // Grok, like Codex: auto-detected from the CLI session. Remove shells
+  // out to `grok logout` (or drops auth.json if the binary is missing).
+  const grok = document.createElement("div");
+  grok.className = "acct-section";
+  grok.appendChild(acctSpan("acct-title provider-name Grok", "Grok"));
+  const grokProvider = lastProviders.find((p) => p.name === "Grok");
+  const grokDetected = Boolean(grokProvider);
+  const grokHint = acctSpan(
+    "acct-hint",
+    grokProvider && !grokProvider.error
+      ? `auto-detected · ${grokProvider.email || grokProvider.plan || "logged in"}`
+      : "auto-detected via the Grok CLI — none found",
+  );
+  if (grokDetected) {
+    const remove = acctSpan("acct-act rm", "✕ remove");
+    remove.addEventListener("click", async () => {
+      remove.classList.add("disabled");
+      remove.textContent = "logging out…";
+      try {
+        await invoke("remove_grok_account");
+        setAccountsMsg("logged out of the Grok CLI", "ok");
+        await refresh();
+        renderAccounts();
+      } catch (error) {
+        setAccountsMsg(String(error), "err");
+        remove.classList.remove("disabled");
+        remove.textContent = "✕ remove";
+      }
+    });
+    grok.appendChild(acctRow(grokHint, remove));
+  } else {
+    grok.appendChild(grokHint);
+  }
+  root.appendChild(grok);
 
   // Cursor: no local credential to detect; manual key/cookie entry.
   const cursor = document.createElement("div");

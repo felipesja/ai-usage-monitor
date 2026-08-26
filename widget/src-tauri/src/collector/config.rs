@@ -27,8 +27,27 @@ pub fn cursor_config() -> PathBuf {
     config_dir().join("cursor.json")
 }
 
+pub fn grok_home() -> PathBuf {
+    std::env::var_os("GROK_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".grok"))
+}
+
+pub fn grok_auth() -> PathBuf {
+    grok_home().join("auth.json")
+}
+
 pub fn config_file() -> PathBuf {
     config_dir().join("config.json")
+}
+
+/// Marks that the user removed Codex from the widget's Accounts view. Codex
+/// owns no credential this app writes — `codex logout` clears its CLI auth,
+/// but the local session cache can still make `collect()` succeed against
+/// stale data. This marker suppresses the provider until a fresh `codex
+/// login` produces live data again, at which point it is cleared automatically.
+pub fn codex_removed_marker() -> PathBuf {
+    config_dir().join("codex-removed")
 }
 
 /// Percentages at which a limit fires a notification. Mirrors

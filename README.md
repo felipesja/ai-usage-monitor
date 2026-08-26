@@ -1,6 +1,6 @@
 # AI Usage Monitor
 
-Native desktop widget for **Windows and macOS** (Tauri) that pins the usage limits of multiple **Claude**, **Codex**, and **Cursor Business** accounts to the corner of your screen — always on top, out of the taskbar/Dock, and starting with the system.
+Native desktop widget for **Windows and macOS** (Tauri) that pins the usage limits of multiple **Claude**, **Codex**, **Cursor Business**, and **Grok** accounts to the corner of your screen — always on top, out of the taskbar/Dock, and starting with the system.
 
 It began as a terminal dashboard (TUI) and grew into the native app, which is now the primary way to use it. Accounts are added straight from the widget (which detects the credentials already on the machine); the Python collector — no external dependencies — offers the same setup from the terminal and doubles as a standalone dashboard.
 
@@ -22,7 +22,7 @@ Native Tauri v2 app (`widget/`; WebView2 on Windows, WKWebView on macOS):
 - **Notifications**: a native notification as a limit rises through each configured threshold (default `80, 90, 95, 98, 100`% — see [Notification thresholds](#notification-thresholds)) — once per level, re-arming only after usage drops back below it.
 - **Start on login**: the autostart entry (registry Run entry on Windows, LaunchAgent on macOS) is enabled on the first run of a release build.
 
-Each provider uses its brand color (Claude coral, OpenAI green, Cursor white) and is identified by the account's real email. With more than one Claude account, the ones **not in use** get a cyan `◉ STANDBY` marker — the account in use is the one the Claude Code CLI is logged into, detected across environments (Windows and WSL alike), falling back to the open 5h session window when no CLI login is found. An external launcher or router can optionally publish `~/.config/ai-usage-monitor/claude-active-account.json` with `email` and Unix `updated_at`; a fresh hint takes precedence for one 5h window, and the app otherwise keeps its normal detection. Limits show up as `Session` (5h window) and `Weekly` (7-day window).
+Each provider uses its brand color (Claude coral, OpenAI green, Cursor white, Grok sand) and is identified by the account's real email. With more than one Claude account, the ones **not in use** get a cyan `◉ STANDBY` marker — the account in use is the one the Claude Code CLI is logged into, detected across environments (Windows and WSL alike), falling back to the open 5h session window when no CLI login is found. An external launcher or router can optionally publish `~/.config/ai-usage-monitor/claude-active-account.json` with `email` and Unix `updated_at`; a fresh hint takes precedence for one 5h window, and the app otherwise keeps its normal detection. Limits show up as `Session` (5h window) and `Weekly` (7-day window).
 
 Build and implementation details: [`widget/README.md`](widget/README.md).
 
@@ -31,7 +31,7 @@ Build and implementation details: [`widget/README.md`](widget/README.md).
 The widget is **self-contained**: collection runs in Rust inside the app itself — no WSL, no Python, no external processes.
 
 ```
-Tauri (Rust) → native collector → Claude, Codex, and Cursor APIs
+Tauri (Rust) → native collector → Claude, Codex, Cursor, and Grok APIs
 ```
 
 Credentials live in `~/.config/ai-usage-monitor/` (`%USERPROFILE%\.config\ai-usage-monitor\` on Windows), in the same format the Python collector uses — both read the same store. Since the limits are server-side, the numbers are identical no matter where the read happens.
@@ -88,6 +88,7 @@ Press `a` (or the `⚙` button) to open the accounts view:
 
 - **Claude**: the widget detects the logins already on the machine — macOS Keychain entries (one per Claude Code config dir, including custom `CLAUDE_CONFIG_DIR` setups) and `~/.claude*/.credentials.json` files — and registers one per click. Sources whose account is already registered are hidden; adding reads the credential (macOS asks for permission), identifies the account, and names the profile after its email.
 - **Codex**: nothing to set up — detected automatically through the Codex CLI.
+- **Grok**: nothing to set up — detected automatically from a `grok login` session (`~/.grok/auth.json`).
 - **Cursor**: enter the Admin API key (plus your email) or the dashboard cookie directly in the form.
 
 The CLI commands below do the same from the terminal and remain the only path on headless setups.
@@ -128,6 +129,16 @@ ai-usage cursor-cookie
 ```
 
 That alternative relies on the dashboard's internal endpoint and may need adjusting if Cursor changes it.
+
+### Grok (SuperGrok)
+
+Nothing to register — sign in with the Grok Build CLI and the widget picks the session up:
+
+```bash
+grok login
+```
+
+Usage is the SuperGrok / Grok Build weekly credit window, not xAI API prepaid credits. Sign out from the accounts view or with `grok logout`.
 
 ## Security
 

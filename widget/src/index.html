@@ -10,6 +10,7 @@
       --claude: #d7875f;
       --openai: #00af87;
       --cursor: #d0d0d0;
+      --grok: #d4b48c;
       --amber: #ffaf00;
       --green: #5fd787;
       --red: #ff5f5f;
@@ -58,16 +59,18 @@
     .provider-name.Claude { color: var(--claude); }
     .provider-name.Codex { color: var(--openai); }
     .provider-name.Cursor { color: var(--cursor); }
+    .provider-name.Grok { color: var(--grok); }
     .plan { margin-left: auto; color: var(--muted); font-size: 10.5px; }
     .badge { font-size: 10px; font-weight: 700; white-space: nowrap; }
     .badge.standby { color: var(--cyan); }
     .email { color: var(--muted); font-size: 10.5px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .error { color: var(--red); font-size: 11px; }
-    .detail { color: var(--muted); font-size: 10.5px; padding-left: 10px; margin-top: 2px; }
+    .detail { color: var(--muted); font-size: 10.5px; padding-left: 0; margin-top: 2px; }
     .detail.warn { color: var(--amber); }
-    .meter { display: grid; grid-template-columns: 1fr auto auto; gap: 3px 8px; align-items: center; padding: 1px 0 1px 10px; }
+    .meter { display: grid; grid-template-columns: 1fr auto auto; gap: 3px 8px; align-items: center; padding: 1px 0; }
     .meter + .meter { margin-top: 6px; }
     .meter .label { color: var(--text); font-size: 12px; white-space: nowrap; overflow: hidden; }
+    .meter .amount { color: var(--muted); font-size: 11px; }
     .meter .bar { grid-column: 1 / -1; height: 7px; background: rgba(255, 255, 255, 0.09); border-radius: 3px; overflow: hidden; margin-top: 1px; }
     .meter .bar > div { height: 100%; border-radius: 3px; }
     .meter .pct { font-weight: 700; font-size: 12px; text-align: right; min-width: 4ch; }

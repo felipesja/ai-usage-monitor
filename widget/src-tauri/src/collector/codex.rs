@@ -19,8 +19,28 @@ use super::{Meter, Provider};
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn collect() -> Provider {
+    let live_result = live();
+    let marker = super::config::codex_removed_marker();
+    if marker.exists() {
+        match &live_result {
+            // A fresh `codex login` produced live data again — welcome back.
+            Ok(_) => {
+                let _ = std::fs::remove_file(&marker);
+            }
+            // Still logged out: ignore any stale session cache and stay hidden,
+            // like a provider that was never set up.
+            Err(_) => {
+                return Provider::with_error(
+                    "Codex",
+                    "ChatGPT",
+                    "no local session found".into(),
+                );
+            }
+        }
+    }
+
     let mut downgrade = None;
-    let raw = match live() {
+    let raw = match live_result {
         Ok(value) => value,
         Err(err) => match cached() {
             Ok(value) => {
@@ -91,11 +111,43 @@ pub fn collect() -> Provider {
     provider
 }
 
+/// Runs `codex logout`, the same as a user typing it in a terminal — this
+/// touches the Codex CLI's own auth (`~/.codex/auth.json`), which the widget
+/// does not own or write, unlike the Claude/Cursor stores.
+pub fn logout() -> Result<(), String> {
+    let mut command = codex_command()?;
+    command.arg("logout");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|err| format!("codex logout did not start: {err}"))?;
+    if !output.status.success() {
+        let text = String::from_utf8_lossy(&output.stderr);
+        let text = if text.trim().is_empty() {
+            String::from_utf8_lossy(&output.stdout)
+        } else {
+            text
+        };
+        return Err(format!("codex logout failed: {}", text.trim()));
+    }
+    // Suppresses the provider even if a stale session cache would otherwise
+    // let `collect()` keep showing old numbers; cleared on the next login.
+    let _ = std::fs::write(super::config::codex_removed_marker(), "");
+    Ok(())
+}
+
 /// The npm shim on Windows (`codex.cmd`) or the native binary installed inside
 /// the npm package. Recent npm versions can leave only `codex`/`codex.ps1` in
 /// the global bin directory, neither of which a GUI process can execute
 /// reliably with its reduced PATH.
-fn codex_command() -> Result<Command, String> {
+pub fn codex_command() -> Result<Command, String> {
     #[cfg(windows)]
     {
         let npm_dir = std::env::var_os("APPDATA")
