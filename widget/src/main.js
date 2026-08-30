@@ -110,8 +110,7 @@ function render(providers) {
 
     const head = document.createElement("div");
     head.className = "provider-head";
-    const identity = document.createElement("div");
-    identity.className = "identity";
+    // Name, standby badge and email share one line — the panel is height-bound.
     const nameRow = document.createElement("div");
     nameRow.className = "name-row";
     const name = document.createElement("span");
@@ -126,12 +125,11 @@ function render(providers) {
       badge.textContent = "◉ standby";
       nameRow.appendChild(badge);
     }
-    identity.appendChild(nameRow);
-    const email = document.createElement("div");
+    const email = document.createElement("span");
     email.className = "email";
     email.textContent = provider.email || provider.account;
-    identity.appendChild(email);
-    head.appendChild(identity);
+    nameRow.appendChild(email);
+    head.appendChild(nameRow);
     if (provider.plan) {
       const plan = document.createElement("span");
       plan.className = "plan";
@@ -222,6 +220,19 @@ function refresh() {
   return refreshPromise;
 }
 
+// The window is sized to its content: measure how much the visible scroll
+// container overflows and ask the shell to grow/shrink by exactly that much.
+// The 2px deadband keeps the 60s refresh from nudging the window every tick.
+function fitWindow() {
+  const el = accountsOpen()
+    ? document.getElementById("accounts")
+    : document.getElementById("providers");
+  if (!el) return;
+  const overflow = el.scrollHeight - el.clientHeight;
+  if (Math.abs(overflow) <= 2) return;
+  invoke("resize_to_content", { height: window.outerHeight + overflow }).catch(console.error);
+}
+
 async function doRefresh() {
   setStatus("↻", "refreshing", true);
   try {
@@ -234,6 +245,7 @@ async function doRefresh() {
     setStatus("●", new Date().toLocaleTimeString("en-GB"), false);
     const visible = providers.filter((p) => !isUnconfigured(p)).length;
     document.getElementById("subtitle").textContent = `${visible} subscription${visible === 1 ? "" : "s"}`;
+    requestAnimationFrame(fitWindow);
   } catch (error) {
     setStatus("!", "refresh failed", true);
     console.error(error);
@@ -511,6 +523,7 @@ async function renderAccounts() {
   msg.className = `acct-msg${accountsMsg.kind ? ` ${accountsMsg.kind}` : ""}`;
   msg.textContent = accountsMsg.text;
   root.appendChild(msg);
+  requestAnimationFrame(fitWindow);
 }
 
 function toggleAccounts(open) {
@@ -519,6 +532,7 @@ function toggleAccounts(open) {
   document.getElementById("foothint").textContent = show ? "esc back" : "r refresh · a accounts · esc hide";
   if (show) renderAccounts();
   else accountsMsg = { text: "", kind: "" };
+  requestAnimationFrame(fitWindow);
 }
 
 document.getElementById("refresh").addEventListener("click", refresh);
@@ -550,7 +564,7 @@ function sendReady() {
 requestAnimationFrame(sendReady);
 setTimeout(sendReady, 250);
 
-document.getElementById("autorefresh").textContent = `auto-refresh every ${INTERVAL_MS / 1000}s`;
+document.getElementById("status").title = `auto-refresh every ${INTERVAL_MS / 1000}s`;
 
 loadAlertThresholds();
 refresh();

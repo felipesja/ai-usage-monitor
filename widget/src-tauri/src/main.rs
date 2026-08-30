@@ -178,6 +178,38 @@ fn hide_to_tray(app: AppHandle, state: tauri::State<'_, Mutex<TrayState>>) {
     hide_widget(&app);
 }
 
+/// Grows/shrinks the window to fit its content, keeping the bottom edge where
+/// it is so the panel does not appear to jump. Deliberately not `apply_position`:
+/// a window the user dragged elsewhere must not snap back to the corner on
+/// every refresh.
+#[tauri::command]
+fn resize_to_content(app: AppHandle, height: f64) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("no main window")?;
+    let scale = window.scale_factor().map_err(|err| err.to_string())?;
+    // Matches `minHeight` in tauri.conf.json — change both together.
+    let min = 320.0;
+    let max = match window.current_monitor().map_err(|err| err.to_string())? {
+        Some(monitor) => {
+            (monitor.work_area().size.height as f64 / monitor.scale_factor()) - 2.0 * MARGIN as f64
+        }
+        None => height,
+    };
+    let target = height.clamp(min, max.max(min));
+
+    let before = window.outer_size().map_err(|err| err.to_string())?;
+    let position = window.outer_position().map_err(|err| err.to_string())?;
+    window
+        .set_size(tauri::LogicalSize::new(before.width as f64 / scale, target))
+        .map_err(|err| err.to_string())?;
+    let after = window.outer_size().map_err(|err| err.to_string())?;
+    // Keep the bottom edge fixed (physical px; x untouched).
+    let y = position.y + before.height as i32 - after.height as i32;
+    window
+        .set_position(tauri::PhysicalPosition::new(position.x, y))
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn frontend_ready(app: AppHandle, state: tauri::State<'_, Mutex<TrayState>>) {
     let show = {
@@ -276,6 +308,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             fetch_usage,
             hide_to_tray,
+            resize_to_content,
             frontend_ready,
             alert_thresholds,
             detect_accounts,

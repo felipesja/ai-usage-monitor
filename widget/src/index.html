@@ -39,22 +39,19 @@
       display: flex;
       align-items: baseline;
       gap: 8px;
-      padding-bottom: 2px;
+      padding-bottom: 6px;
     }
     header .brand { color: var(--cyan); font-weight: 700; }
     header .status { margin-left: auto; color: var(--green); font-size: 11px; display: flex; align-items: center; gap: 4px; }
     header .status.fetching { color: var(--amber); }
     @keyframes spin { to { transform: rotate(360deg); } }
     header .status.fetching .icon { display: inline-block; animation: spin 1s linear infinite; }
-    .subtitle-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
     .subtitle { color: var(--muted); font-size: 11px; }
-    /* Right-aligned so it sits directly under the header's timestamp. */
-    .autorefresh { margin-left: auto; color: var(--muted); font-size: 10.5px; }
     main { flex: 1; overflow-y: auto; scrollbar-width: none; }
-    .provider { margin-bottom: 18px; }
-    .provider-head { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
-    .identity { flex: 1; min-width: 0; }
-    .name-row { display: flex; align-items: baseline; gap: 8px; }
+    .provider { margin-bottom: 12px; }
+    .provider:last-child { margin-bottom: 0; }
+    .provider-head { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+    .name-row { display: flex; align-items: baseline; gap: 8px; flex: 1; min-width: 0; }
     .provider-name { font-weight: 700; }
     .provider-name.Claude { color: var(--claude); }
     .provider-name.Codex { color: var(--openai); }
@@ -63,17 +60,17 @@
     .plan { margin-left: auto; color: var(--muted); font-size: 10.5px; }
     .badge { font-size: 10px; font-weight: 700; white-space: nowrap; }
     .badge.standby { color: var(--cyan); }
-    .email { color: var(--muted); font-size: 10.5px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .email { color: var(--muted); font-size: 10.5px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .error { color: var(--red); font-size: 11px; }
     .detail { color: var(--muted); font-size: 10.5px; padding-left: 0; margin-top: 2px; }
     .detail.warn { color: var(--amber); }
-    .meter { display: grid; grid-template-columns: 1fr auto auto; gap: 3px 8px; align-items: center; padding: 1px 0; }
-    .meter + .meter { margin-top: 6px; }
+    .meter { display: grid; grid-template-columns: 1fr auto auto; gap: 0 8px; align-items: center; padding: 0; }
+    .meter + .meter { margin-top: 4px; }
     .meter .label { color: var(--text); font-size: 12px; white-space: nowrap; overflow: hidden; }
     .meter .amount { color: var(--muted); font-size: 11px; }
-    .meter .bar { grid-column: 1 / -1; height: 7px; background: rgba(255, 255, 255, 0.09); border-radius: 3px; overflow: hidden; margin-top: 1px; }
+    .meter .bar { grid-column: 1 / -1; height: 6px; background: rgba(255, 255, 255, 0.09); border-radius: 3px; overflow: hidden; margin-top: 2px; }
     .meter .bar > div { height: 100%; border-radius: 3px; }
-    .meter .pct { font-weight: 700; font-size: 12px; text-align: right; min-width: 4ch; }
+    .meter .pct { font-weight: 700; font-size: 11px; text-align: right; min-width: 4ch; }
     .meter .reset { color: var(--muted); font-size: 11px; text-align: right; min-width: 8ch; }
     .meter.idle .label, .meter.idle .pct, .meter.idle .reset { color: var(--dim); }
     .meter.idle .pct { font-weight: 400; }
@@ -126,12 +123,9 @@
 <body data-tauri-drag-region>
   <header data-tauri-drag-region>
     <span class="brand">◆ AI USAGE</span>
-    <span class="status" id="status"><span class="icon">○</span><span class="text">loading</span></span>
-  </header>
-  <div class="subtitle-row">
     <span class="subtitle" id="subtitle"></span>
-    <span class="autorefresh" id="autorefresh">auto-refresh every 60s</span>
-  </div>
+    <span class="status" id="status" title="auto-refresh every 60s"><span class="icon">○</span><span class="text">loading</span></span>
+  </header>
   <main id="providers" data-tauri-drag-region></main>
   <section id="accounts"></section>
   <footer>
