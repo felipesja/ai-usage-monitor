@@ -58,6 +58,11 @@ GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 GROK_TOKEN_URL = "https://auth.x.ai/oauth2/token"
 # Refresh the Grok CLI token when under this many seconds remain, matching Claude.
 GROK_REFRESH_BUFFER = 120
+CURSOR_EVENTS_URL = "https://cursor.com/api/dashboard/get-filtered-usage-events"
+# Cursor caps pageSize at 1000 (400 above that); 5 pages covers any real cycle.
+CURSOR_EVENTS_PAGE_SIZE = 1000
+CURSOR_EVENTS_MAX_PAGES = 5
+WEEK_SECONDS = 7 * 24 * 3600
 
 
 @dataclass
@@ -371,6 +376,93 @@ def cursor_plan_usage(plan: dict[str, Any]) -> tuple[float, float, float]:
     return min(used, total), total, included
 
 
+def cursor_epoch(value: Any) -> float | None:
+    """`billingCycleStart`/`End` as epoch seconds. The dashboard payload uses
+    ISO-8601 strings; accept a raw epoch-ms number too, defensively."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) / 1000
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def cursor_events(token: str, start: float, end: float) -> list[tuple[float, float]]:
+    """(epoch seconds, raw cost in cents) for every usage event in the window.
+
+    Undocumented dashboard endpoint. It rejects the request without an `Origin`
+    header (403 "Invalid origin for state-changing request") — `Referer` alone
+    does not satisfy it."""
+    headers = {
+        "Cookie": f"WorkosCursorSessionToken={token}",
+        "User-Agent": APP,
+        "Origin": "https://cursor.com",
+    }
+    events: list[tuple[float, float]] = []
+    page = 1
+    while page <= CURSOR_EVENTS_MAX_PAGES:
+        payload = request_json(
+            CURSOR_EVENTS_URL,
+            method="POST",
+            headers=headers,
+            body={
+                "startDate": str(int(start * 1000)),
+                "endDate": str(int(end * 1000)),
+                "page": page,
+                "pageSize": CURSOR_EVENTS_PAGE_SIZE,
+            },
+        )
+        for item in payload.get("usageEventsDisplay") or []:
+            try:
+                moment = float(item.get("timestamp")) / 1000
+                cost = float((item.get("tokenUsage") or {}).get("totalCents") or 0)
+            except (TypeError, ValueError):
+                continue
+            events.append((moment, cost))
+        total = int(payload.get("totalUsageEventsCount") or 0)
+        if page * CURSOR_EVENTS_PAGE_SIZE >= total:
+            break
+        page += 1
+    return events
+
+
+def cursor_week_window(cycle_start: float, cycle_end: float, now: float) -> tuple[float, float]:
+    """The cycle-aligned week `now` falls in. Aligning to the cycle keeps the
+    weekly budget an exact share of the monthly quota; the trailing week is
+    short and gets a proportionally smaller budget."""
+    index = max(0, int((now - cycle_start) // WEEK_SECONDS))
+    start = cycle_start + WEEK_SECONDS * index
+    return start, min(start + WEEK_SECONDS, cycle_end)
+
+
+def cursor_weekly_meter(
+    cycle_start: float,
+    cycle_end: float,
+    now: float,
+    plan_total: float,
+    events: list[tuple[float, float]],
+) -> Meter | None:
+    """Pace gauge: this cycle-week's raw spend against its share of the monthly
+    limit. Before the plan overflows, the limit is charged in the same raw
+    model-cost units the events endpoint reports, so no quota-dollar conversion
+    is needed — `used` is simply the window's `tokenUsage.totalCents`. The
+    percent is deliberately not clamped — over 100% is the signal that the burn
+    rate is above what the cycle can sustain."""
+    if cycle_end <= cycle_start or plan_total <= 0:
+        return None
+    start, end = cursor_week_window(cycle_start, cycle_end, now)
+    if end <= start:
+        return None
+    budget = plan_total * (end - start) / (cycle_end - cycle_start)
+    if budget <= 0:
+        return None
+    used = sum(cost for moment, cost in events if start <= moment < end)
+    reset_at = dt.datetime.fromtimestamp(end, dt.timezone.utc).isoformat()
+    return Meter("Weekly", used * 100 / budget, reset_at)
+
+
 def extra_usage_detail(extra: dict[str, Any]) -> str:
     """One line describing the extra-usage credits, or "" when there are none.
 
@@ -607,10 +699,26 @@ def collect_cursor() -> Provider:
                     "Usage",
                     percent,
                     data.get("billingCycleEnd"),
-                    cursor_money(used),
-                    cursor_money(total),
                 )
             )
+            # Pace gauge over the cycle-aligned week. Best effort: the events
+            # endpoint is undocumented, so a failure just drops the meter and
+            # leaves the monthly bar alone.
+            try:
+                cycle_start = cursor_epoch(data.get("billingCycleStart"))
+                cycle_end = cursor_epoch(data.get("billingCycleEnd"))
+                if cycle_start is not None and cycle_end is not None:
+                    week = cursor_weekly_meter(
+                        cycle_start,
+                        cycle_end,
+                        time.time(),
+                        total,
+                        cursor_events(token, cycle_start, cycle_end),
+                    )
+                    if week is not None:
+                        result.meters.append(week)
+            except Exception:
+                pass
             if used - included > 0:
                 result.details.append(f"Extra usage: {cursor_money(used - included)}")
             auto_percent = plan.get("autoPercentUsed")
