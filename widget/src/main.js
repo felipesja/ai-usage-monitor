@@ -94,8 +94,14 @@ async function loadAlertThresholds() {
 function isUnconfigured(provider) {
   if (!provider.error || provider.meters?.length) return false;
   if (provider.name === "Cursor") return provider.error.startsWith("set it up with");
-  if (provider.name === "Codex" || provider.name === "Grok") {
+  if (provider.name === "Grok") {
     return provider.error.includes("no local session found");
+  }
+  // Registered Codex profiles (account is the profile dir, not "ChatGPT")
+  // stay visible when their copy cannot refresh. Only the auto-detected
+  // live CLI is hidden until `codex login`.
+  if (provider.name === "Codex") {
+    return provider.account === "ChatGPT" && provider.error.includes("no local session found");
   }
   return false;
 }
@@ -288,7 +294,7 @@ async function renderAccounts() {
   const root = document.getElementById("accounts");
   root.replaceChildren();
 
-  let detection = { claude: [], cursor: { configured: false, method: null, email: null } };
+  let detection = { claude: [], cursor: { configured: false, method: null, email: null }, codex: { present: false, email: null } };
   try {
     detection = JSON.parse(await invoke("detect_accounts"));
   } catch (error) {
@@ -362,25 +368,78 @@ async function renderAccounts() {
   }
   root.appendChild(claude);
 
-  // Codex needs no registration; report what the collector sees. Unlike
-  // Claude/Cursor, there is no credential file this app owns — "remove"
-  // shells out to `codex logout`, the CLI's own command.
+  // Codex: stored profiles (this app owns those copies) plus the live CLI
+  // session. "+ add" captures the CLI login; "✕ remove" on a profile only
+  // drops the copy. Logging the CLI out is a separate action.
   const codex = document.createElement("div");
   codex.className = "acct-section";
   codex.appendChild(acctSpan("acct-title provider-name Codex", "Codex"));
-  const codexProvider = lastProviders.find((p) => p.name === "Codex");
-  const codexDetected = Boolean(codexProvider);
-  const codexHint = acctSpan(
-    "acct-hint",
-    codexProvider && !codexProvider.error
-      ? `auto-detected · ${codexProvider.email || "logged in"}`
-      : "auto-detected via the Codex CLI — none found",
+  const codexRegistered = lastProviders.filter(
+    (p) => p.name === "Codex" && p.account && p.account !== "ChatGPT",
   );
-  if (codexDetected) {
+  const knownCodexEmails = new Set(
+    codexRegistered.map((p) => (p.email || "").toLowerCase()).filter(Boolean),
+  );
+  for (const provider of codexRegistered) {
     const remove = acctSpan("acct-act rm", "✕ remove");
     remove.addEventListener("click", async () => {
-      remove.classList.add("disabled");
-      remove.textContent = "logging out…";
+      try {
+        await invoke("remove_codex_profile", { profile: provider.account });
+        setAccountsMsg(`removed ${provider.account}`, "ok");
+        await refresh();
+        renderAccounts();
+      } catch (error) {
+        setAccountsMsg(String(error), "err");
+      }
+    });
+    const meta = provider.standby ? "standby" : provider.plan || "";
+    codex.appendChild(
+      acctRow(
+        acctSpan("who", provider.email || provider.account),
+        acctSpan("meta", meta),
+        remove,
+      ),
+    );
+  }
+  if (!codexRegistered.length) {
+    codex.appendChild(acctSpan("acct-hint", "no profiles registered"));
+  }
+  const liveCodex = lastProviders.find(
+    (p) => p.name === "Codex" && p.account === "ChatGPT" && !p.error,
+  );
+  const liveEmail = (detection.codex?.email || liveCodex?.email || "").toLowerCase();
+  const canAdd =
+    Boolean(detection.codex?.present) &&
+    (!liveEmail || !knownCodexEmails.has(liveEmail));
+  if (canAdd) {
+    const add = acctSpan("acct-act add", "+ add");
+    add.addEventListener("click", async () => {
+      add.classList.add("disabled");
+      add.textContent = "adding…";
+      setAccountsMsg("reading the Codex CLI session…");
+      try {
+        const result = JSON.parse(await invoke("add_codex_account"));
+        setAccountsMsg(
+          result.already
+            ? `${result.email} is already registered as '${result.profile}'`
+            : `added ${result.email} as '${result.profile}'`,
+          "ok",
+        );
+        await refresh();
+        renderAccounts();
+      } catch (error) {
+        setAccountsMsg(String(error), "err");
+        add.classList.remove("disabled");
+        add.textContent = "+ add";
+      }
+    });
+    const label = liveCodex
+      ? `CLI · ${liveCodex.email || "logged in"}`
+      : "CLI · current session";
+    const logout = acctSpan("acct-act rm", "✕ logout");
+    logout.addEventListener("click", async () => {
+      logout.classList.add("disabled");
+      logout.textContent = "logging out…";
       try {
         await invoke("remove_codex_account");
         setAccountsMsg("logged out of the Codex CLI", "ok");
@@ -388,13 +447,13 @@ async function renderAccounts() {
         renderAccounts();
       } catch (error) {
         setAccountsMsg(String(error), "err");
-        remove.classList.remove("disabled");
-        remove.textContent = "✕ remove";
+        logout.classList.remove("disabled");
+        logout.textContent = "✕ logout";
       }
     });
-    codex.appendChild(acctRow(codexHint, remove));
-  } else {
-    codex.appendChild(codexHint);
+    codex.appendChild(acctRow(acctSpan("who", label), add, logout));
+  } else if (!codexRegistered.length) {
+    codex.appendChild(acctSpan("acct-hint", "auto-detected via the Codex CLI — none found"));
   }
   root.appendChild(codex);
 

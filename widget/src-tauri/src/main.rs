@@ -70,6 +70,24 @@ fn remove_cursor_config() -> Result<(), String> {
     accounts::remove_cursor()
 }
 
+/// Copies the live Codex CLI session into the credential store, named after
+/// the account's email — same idea as `add_claude_account`.
+#[tauri::command]
+async fn add_codex_account() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        accounts::add_codex()
+            .and_then(|registered| serde_json::to_string(&registered).map_err(|err| err.to_string()))
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// Drops a stored Codex profile. Does not log the CLI out.
+#[tauri::command]
+fn remove_codex_profile(profile: String) -> Result<(), String> {
+    accounts::remove_codex_profile(&profile)
+}
+
 /// Logs the Codex CLI out (`codex logout`) — a subprocess call, unlike the
 /// Claude/Cursor removals which just delete a file this app owns.
 #[tauri::command]
@@ -314,6 +332,8 @@ fn main() {
             detect_accounts,
             add_claude_account,
             remove_claude_account,
+            add_codex_account,
+            remove_codex_profile,
             save_cursor_config,
             remove_cursor_config,
             remove_codex_account,

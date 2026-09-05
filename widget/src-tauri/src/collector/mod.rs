@@ -88,6 +88,7 @@ pub fn http_client() -> Result<reqwest::blocking::Client, String> {
 
 pub fn collect_all() -> Vec<Provider> {
     let profiles = claude_profiles();
+    let codex_targets = codex::targets();
     let mut providers: Vec<Provider> = Vec::new();
 
     std::thread::scope(|scope| {
@@ -95,19 +96,25 @@ pub fn collect_all() -> Vec<Provider> {
             .iter()
             .map(|dir| scope.spawn(move || claude::collect(dir)))
             .collect();
-        let codex = scope.spawn(codex::collect);
         let cursor = scope.spawn(cursor::collect);
         let grok = scope.spawn(grok::collect);
+        // Two Codex app-servers at once time out or steal each other's auth.
+        let mut codex_providers = Vec::new();
+        for (account, home) in &codex_targets {
+            codex_providers.push(codex::collect_home(home, account));
+        }
 
         for handle in claude_handles {
             providers.push(handle.join().expect("Claude collector thread panicked"));
         }
-        providers.push(codex.join().expect("Codex collector thread panicked"));
+        providers.extend(codex_providers);
         providers.push(cursor.join().expect("Cursor collector thread panicked"));
         providers.push(grok.join().expect("Grok collector thread panicked"));
     });
 
+    codex::sync_live_profiles();
     mark_standby(&mut providers);
+    mark_codex_standby(&mut providers);
     providers
 }
 
@@ -178,6 +185,35 @@ fn mark_standby(providers: &mut [Provider]) {
     for provider in providers
         .iter_mut()
         .filter(|p| p.name == "Claude" && p.error.is_none())
+    {
+        provider.standby = !in_use.contains(&provider.account);
+    }
+}
+
+/// Flag stored Codex accounts that are not the live CLI login.
+fn mark_codex_standby(providers: &mut [Provider]) {
+    let count = providers
+        .iter()
+        .filter(|p| p.name == "Codex" && p.error.is_none())
+        .count();
+    if count < 2 {
+        return;
+    }
+    let live_email = codex::email_from(&config::default_codex_home()).to_lowercase();
+    if live_email.is_empty() {
+        return;
+    }
+    let in_use: HashSet<String> = providers
+        .iter()
+        .filter(|p| p.name == "Codex" && p.error.is_none() && p.email.to_lowercase() == live_email)
+        .map(|p| p.account.clone())
+        .collect();
+    if in_use.is_empty() || in_use.len() == count {
+        return;
+    }
+    for provider in providers
+        .iter_mut()
+        .filter(|p| p.name == "Codex" && p.error.is_none())
     {
         provider.standby = !in_use.contains(&provider.account);
     }

@@ -22,7 +22,7 @@ Native Tauri v2 app (`widget/`; WebView2 on Windows, WKWebView on macOS):
 - **Notifications**: a native notification as a limit rises through each configured threshold (default `80, 90, 95, 98, 100`% — see [Notification thresholds](#notification-thresholds)) — once per level, re-arming only after usage drops back below it.
 - **Start on login**: the autostart entry (registry Run entry on Windows, LaunchAgent on macOS) is enabled on the first run of a release build.
 
-Each provider uses its brand color (Claude coral, OpenAI green, Cursor white, Grok sand) and is identified by the account's real email. With more than one Claude account, the ones **not in use** get a cyan `◉ STANDBY` marker — the account in use is the one the Claude Code CLI is logged into, detected across environments (Windows and WSL alike), falling back to the open 5h session window when no CLI login is found. An external launcher or router can optionally publish `~/.config/ai-usage-monitor/claude-active-account.json` with `email` and Unix `updated_at`; a fresh hint takes precedence for one 5h window, and the app otherwise keeps its normal detection. Limits show up as `Session` (5h window) and `Weekly` (7-day window).
+Each provider uses its brand color (Claude coral, OpenAI green, Cursor white, Grok sand) and is identified by the account's real email. With more than one Claude account, the ones **not in use** get a cyan `◉ STANDBY` marker — the account in use is the one the Claude Code CLI is logged into, detected across environments (Windows and WSL alike), falling back to the open 5h session window when no CLI login is found. An external launcher or router can optionally publish `~/.config/ai-usage-monitor/claude-active-account.json` with `email` and Unix `updated_at`; a fresh hint takes precedence for one 5h window, and the app otherwise keeps its normal detection. Two or more Codex accounts get the same marker: the unbadged one is the Codex CLI login. Limits show up as `Session` (5h window) and `Weekly` (7-day window).
 
 Build and implementation details: [`widget/README.md`](widget/README.md).
 
@@ -87,7 +87,7 @@ Each level fires once and re-arms only after usage falls a few points below it, 
 Press `a` (or the `⚙` button) to open the accounts view:
 
 - **Claude**: the widget detects the logins already on the machine — macOS Keychain entries (one per Claude Code config dir, including custom `CLAUDE_CONFIG_DIR` setups) and `~/.claude*/.credentials.json` files — and registers one per click. Sources whose account is already registered are hidden; adding reads the credential (macOS asks for permission), identifies the account, and names the profile after its email.
-- **Codex**: nothing to set up — detected automatically through the Codex CLI.
+- **Codex**: the live Codex CLI session is detected automatically. Extra accounts are added with `+ add` (captures the current CLI login) or the CLI commands below.
 - **Grok**: nothing to set up — detected automatically from a `grok login` session (`~/.grok/auth.json`).
 - **Cursor**: enter the Admin API key (plus your email) or the dashboard cookie directly in the form.
 
@@ -111,6 +111,27 @@ ai-usage claude-add claude-1
 ```
 
 Profiles are kept separate under `~/.config/ai-usage-monitor/claude/`, with private permissions. The monitor refreshes each profile's tokens independently.
+
+### Two Codex accounts
+
+The live Codex CLI session is always shown. To keep a second ChatGPT/Codex account on the panel without logging the CLI out of the first one:
+
+```bash
+ai-usage codex-login work
+```
+
+That runs `codex login` under an isolated `CODEX_HOME`, then stores the session. The default `~/.codex` login is left alone.
+
+Alternatively, capture whichever account the CLI is logged into (repeat after switching):
+
+```bash
+codex login
+ai-usage codex-add personal
+```
+
+In the widget, `⚙` → Codex → `+ add` does the same as `codex-add`, naming the profile after the email.
+
+Profiles live under `~/.config/ai-usage-monitor/codex/`. Codex refresh tokens are single-use, so while the CLI is logged into a registered account the monitor reads that live `auth.json` (and keeps the stored copy in sync) instead of refreshing a fork that would sign the CLI out.
 
 ### Cursor Business
 

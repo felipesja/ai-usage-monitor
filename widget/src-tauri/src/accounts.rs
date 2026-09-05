@@ -11,7 +11,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::collector::claude;
-use crate::collector::config::{claude_dir, cursor_config, home, read_json, write_json};
+use crate::collector::codex;
+use crate::collector::config::{
+    claude_dir, codex_dir, cursor_config, default_codex_home, home, read_json, write_json,
+};
 
 #[derive(Serialize)]
 pub struct Candidate {
@@ -27,6 +30,16 @@ pub struct Candidate {
 pub struct Detection {
     pub claude: Vec<Candidate>,
     pub cursor: CursorDetection,
+    pub codex: CodexDetection,
+}
+
+#[derive(Serialize)]
+pub struct CodexDetection {
+    /// The live CLI has an `auth.json`. `email` is the `id_token` claim when
+    /// present, so the UI can hide `+ add` after that account is registered
+    /// (the live row is then labeled with the profile name, not `ChatGPT`).
+    pub present: bool,
+    pub email: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -48,7 +61,23 @@ pub fn detect() -> Detection {
     #[cfg(target_os = "macos")]
     claude_candidates.extend(keychain_candidates(&keychain));
     claude_candidates.extend(file_candidates(&keychain));
-    Detection { claude: claude_candidates, cursor: detect_cursor() }
+    Detection {
+        claude: claude_candidates,
+        cursor: detect_cursor(),
+        codex: detect_codex(),
+    }
+}
+
+fn detect_codex() -> CodexDetection {
+    let live = default_codex_home();
+    let present = live.join("auth.json").is_file();
+    let email = if present {
+        let email = codex::email_from(&live);
+        (!email.is_empty()).then_some(email)
+    } else {
+        None
+    };
+    CodexDetection { present, email }
 }
 
 /// Non-secret Cursor metadata for prefilling the account editor. The stored
@@ -237,7 +266,7 @@ pub fn add_claude(id: &str) -> Result<Registered, String> {
         }
     }
 
-    let name = profile_name(&email);
+    let name = profile_name(&claude_dir(), &email);
     let target = claude_dir().join(&name);
     fs::rename(&staging, &target).map_err(|err| err.to_string())?;
     Ok(Registered { profile: name, email, plan, already: false })
@@ -297,6 +326,66 @@ pub fn remove_cursor() -> Result<(), String> {
     fs::remove_file(cursor_config()).map_err(|err| err.to_string())
 }
 
+pub fn add_codex() -> Result<Registered, String> {
+    let live = default_codex_home();
+    let source = live.join("auth.json");
+    let data = read_json(&source)?;
+    let tokens = data.get("tokens").cloned().unwrap_or(Value::Null);
+    if tokens.get("id_token").and_then(Value::as_str).is_none() {
+        return Err("the Codex CLI does not contain a login".into());
+    }
+    let email = codex::email_from(&live);
+    if email.is_empty() {
+        return Err("could not read the email from the Codex session".into());
+    }
+
+    for dir in codex::profile_dirs() {
+        if codex::email_from(&dir).eq_ignore_ascii_case(&email) {
+            let profile = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_string();
+            return Ok(Registered {
+                profile,
+                email,
+                plan: String::new(),
+                already: true,
+            });
+        }
+    }
+
+    let name = profile_name(&codex_dir(), &email);
+    let dest = codex_dir().join(&name);
+    write_json(&dest.join("auth.json"), &data)?;
+    let _ = fs::write(
+        dest.join("config.toml"),
+        "cli_auth_credentials_store = \"file\"\n",
+    );
+    Ok(Registered {
+        profile: name,
+        email,
+        plan: String::new(),
+        already: false,
+    })
+}
+
+pub fn remove_codex_profile(profile: &str) -> Result<(), String> {
+    if profile.is_empty()
+        || profile.starts_with('.')
+        || profile.contains('/')
+        || profile.contains('\\')
+        || profile.contains("..")
+    {
+        return Err("invalid profile name".into());
+    }
+    let dir = codex_dir().join(profile);
+    if !dir.join("auth.json").is_file() {
+        return Err(format!("profile not found: {profile}"));
+    }
+    fs::remove_dir_all(&dir).map_err(|err| err.to_string())
+}
+
 fn read_source(id: &str) -> Result<Value, String> {
     if let Some(path) = id.strip_prefix("file:") {
         return read_json(Path::new(path));
@@ -340,17 +429,17 @@ fn profiles() -> Vec<PathBuf> {
 
 /// Sanitized email local part, suffixed on collision (same email never
 /// collides — that is deduplicated before naming).
-fn profile_name(email: &str) -> String {
-    let local = email.split('@').next().unwrap_or("claude").to_lowercase();
+fn profile_name(root: &Path, email: &str) -> String {
+    let local = email.split('@').next().unwrap_or("account").to_lowercase();
     let base: String = local
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' })
         .collect();
     let base = base.trim_matches(|c| c == '-' || c == '.').to_string();
-    let base = if base.is_empty() { "claude".to_string() } else { base };
+    let base = if base.is_empty() { "account".to_string() } else { base };
     let mut name = base.clone();
     let mut counter = 2;
-    while claude_dir().join(&name).exists() {
+    while root.join(&name).exists() {
         name = format!("{base}-{counter}");
         counter += 1;
     }

@@ -6,23 +6,32 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use super::config::{home, read_json};
+use super::config::{
+    default_codex_home, home, read_json, write_json, CODEX_LIVE_ACCOUNT,
+};
 use super::date::epoch_to_iso;
 use super::{Meter, Provider};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-pub fn collect() -> Provider {
-    let live_result = live();
+const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const REFRESH_BUFFER_SECS: f64 = 120.0;
+
+/// One Codex account from a given `CODEX_HOME` (live CLI or a stored profile).
+pub fn collect_home(home: &std::path::Path, account: &str) -> Provider {
+    let is_live = same_home(home, &default_codex_home());
+    let fetch_result = if is_live { live(home) } else { http(home) };
     let marker = super::config::codex_removed_marker();
-    if marker.exists() {
-        match &live_result {
+    if is_live && marker.exists() {
+        match &fetch_result {
             // A fresh `codex login` produced live data again — welcome back.
             Ok(_) => {
                 let _ = std::fs::remove_file(&marker);
@@ -30,25 +39,21 @@ pub fn collect() -> Provider {
             // Still logged out: ignore any stale session cache and stay hidden,
             // like a provider that was never set up.
             Err(_) => {
-                return Provider::with_error(
-                    "Codex",
-                    "ChatGPT",
-                    "no local session found".into(),
-                );
+                return collect_error(home, account, "no local session found".into());
             }
         }
     }
 
     let mut downgrade = None;
-    let raw = match live_result {
+    let raw = match fetch_result {
         Ok(value) => value,
-        Err(err) => match cached() {
+        Err(err) => match cached(home) {
             Ok(value) => {
                 downgrade = Some(err);
                 value
             }
-            Err(cache_err) => {
-                return Provider::with_error("Codex", "ChatGPT", format!("{err}; cache: {cache_err}"))
+            Err(_) => {
+                return collect_error(home, account, describe_live_error(&err));
             }
         },
     };
@@ -60,9 +65,9 @@ pub fn collect() -> Provider {
         .and_then(Value::as_str)
         .unwrap_or("")
         .replace('_', " ");
-    let mut provider = Provider::new("Codex", "ChatGPT", &title_case(&plan), &email());
+    let mut provider = Provider::new("Codex", account, &title_case(&plan), &email_from(home));
     if let Some(err) = downgrade {
-        provider.details.push(format!("⚠ local cache · app-server: {err}"));
+        provider.details.push(format!("⚠ local cache · {}", describe_live_error(&err)));
     }
 
     for key in ["primary", "secondary"] {
@@ -109,6 +114,174 @@ pub fn collect() -> Provider {
         }
     }
     provider
+}
+
+fn collect_error(home: &std::path::Path, account: &str, error: String) -> Provider {
+    let mut provider = Provider::with_error("Codex", account, error);
+    provider.email = email_from(home);
+    provider
+}
+
+fn describe_live_error(err: &str) -> String {
+    let lower = err.to_lowercase();
+    if ["authentication required", "unauthorized", "invalid_grant", "401", "403"]
+        .iter()
+        .any(|part| lower.contains(part))
+    {
+        "session expired — log into this account in the Codex CLI, then add it again".into()
+    } else {
+        err.to_string()
+    }
+}
+
+fn now_epoch() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|delta| delta.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn jwt_claims(token: &str) -> Option<Value> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn jwt_exp(token: &str) -> f64 {
+    jwt_claims(token)
+        .and_then(|claims| claims.get("exp").and_then(Value::as_f64))
+        .unwrap_or(0.0)
+}
+
+fn refresh_auth(codex_home: &std::path::Path, force: bool) -> Result<Value, String> {
+    let path = codex_home.join("auth.json");
+    let mut data = read_json(&path)?;
+    let tokens = data.get("tokens").cloned().unwrap_or(Value::Null);
+    let access = tokens
+        .get("access_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let refresh = tokens
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if !force && jwt_exp(&access) > now_epoch() + REFRESH_BUFFER_SECS {
+        return Ok(data);
+    }
+    if refresh.is_empty() {
+        return Err("session expired — log into this account in the Codex CLI, then add it again".into());
+    }
+    let client = super::http_client()?;
+    let response: Value = client
+        .post(TOKEN_URL)
+        .header("Accept", "application/json")
+        .header("User-Agent", "codex-cli")
+        .json(&json!({
+            "client_id": CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "scope": "openid profile email",
+        }))
+        .send()
+        .map_err(|err| err.to_string())?
+        .error_for_status()
+        .map_err(|err| err.to_string())?
+        .json()
+        .map_err(|err| err.to_string())?;
+    let access = response
+        .get("access_token")
+        .and_then(Value::as_str)
+        .ok_or("ChatGPT token refresh did not return an access token")?;
+    let tokens = data
+        .get_mut("tokens")
+        .and_then(Value::as_object_mut)
+        .ok_or("auth.json has no tokens")?;
+    tokens.insert("access_token".into(), json!(access));
+    if let Some(rotated) = response.get("refresh_token").and_then(Value::as_str) {
+        tokens.insert("refresh_token".into(), json!(rotated));
+    }
+    if let Some(id_token) = response.get("id_token").and_then(Value::as_str) {
+        tokens.insert("id_token".into(), json!(id_token));
+    }
+    write_json(&path, &data)?;
+    Ok(data)
+}
+
+fn usage_from_wham(usage: &Value) -> Value {
+    let rate = usage
+        .get("rate_limit")
+        .or_else(|| usage.get("rateLimit"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let plan = usage
+        .get("plan_type")
+        .or_else(|| usage.get("planType"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    json!({
+        "rateLimits": {
+            "planType": plan,
+            "primary": window_block(rate.get("primary_window").or_else(|| rate.get("primary"))),
+            "secondary": window_block(rate.get("secondary_window").or_else(|| rate.get("secondary"))),
+            "credits": usage.get("credits").or_else(|| rate.get("credits")).cloned().unwrap_or(json!({})),
+        }
+    })
+}
+
+fn window_block(block: Option<&Value>) -> Value {
+    let Some(block) = block.filter(|value| value.is_object()) else {
+        return Value::Null;
+    };
+    let minutes = block
+        .get("limit_window_seconds")
+        .or_else(|| block.get("window_seconds"))
+        .and_then(Value::as_f64)
+        .map(|seconds| seconds / 60.0)
+        .or_else(|| block.get("windowDurationMins").and_then(Value::as_f64));
+    json!({
+        "usedPercent": block.get("used_percent").or_else(|| block.get("usedPercent")).cloned(),
+        "windowDurationMins": minutes,
+        "resetsAt": block.get("reset_at").or_else(|| block.get("resets_at")).or_else(|| block.get("resetsAt")).cloned(),
+    })
+}
+
+fn get_usage(client: &reqwest::blocking::Client, data: &Value) -> Result<Value, String> {
+    let tokens = data.get("tokens").cloned().unwrap_or(Value::Null);
+    let access = tokens
+        .get("access_token")
+        .and_then(Value::as_str)
+        .ok_or("Codex auth.json has no access token")?;
+    let mut request = client
+        .get(USAGE_URL)
+        .header("Authorization", format!("Bearer {access}"))
+        .header("Accept", "application/json")
+        .header("User-Agent", "codex-cli");
+    if let Some(account_id) = tokens.get("account_id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+        request = request.header("ChatGPT-Account-Id", account_id);
+    }
+    let usage: Value = request
+        .send()
+        .map_err(|err| err.to_string())?
+        .error_for_status()
+        .map_err(|err| err.to_string())?
+        .json()
+        .map_err(|err| err.to_string())?;
+    Ok(usage_from_wham(&usage))
+}
+
+fn http(codex_home: &std::path::Path) -> Result<Value, String> {
+    let mut data = refresh_auth(codex_home, false)?;
+    let client = super::http_client()?;
+    match get_usage(&client, &data) {
+        Ok(value) => Ok(value),
+        Err(err) if err.contains("401") || err.contains("403") => {
+            data = refresh_auth(codex_home, true)?;
+            get_usage(&client, &data)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Runs `codex logout`, the same as a user typing it in a terminal — this
@@ -299,9 +472,11 @@ fn find_codex() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("codex"))
 }
 
-fn live() -> Result<Value, String> {
+fn live(codex_home: &std::path::Path) -> Result<Value, String> {
+    let _ = std::fs::create_dir_all(codex_home);
     let mut command = codex_command()?;
     command
+        .env("CODEX_HOME", codex_home)
         .arg("app-server")
         .arg("--stdio")
         .stdin(Stdio::piped())
@@ -378,8 +553,8 @@ fn terminate(child: &mut Child) {
 }
 
 /// Last `token_count` carrying `rate_limits` in the most recent session.
-fn cached() -> Result<Value, String> {
-    let dir = home().join(".codex").join("sessions");
+fn cached(codex_home: &std::path::Path) -> Result<Value, String> {
+    let dir = codex_home.join("sessions");
     let latest = newest_jsonl(&dir).ok_or("no local session found")?;
     let file = std::fs::File::open(&latest).map_err(|err| err.to_string())?;
     let mut found = None;
@@ -419,9 +594,9 @@ fn newest_jsonl(dir: &std::path::Path) -> Option<PathBuf> {
     best.map(|(_, path)| path)
 }
 
-/// Email from the `id_token` claims in `~/.codex/auth.json`.
-fn email() -> String {
-    let Ok(auth) = read_json(&home().join(".codex").join("auth.json")) else {
+/// Email from the `id_token` claims in `$CODEX_HOME/auth.json`.
+pub fn email_from(codex_home: &std::path::Path) -> String {
+    let Ok(auth) = read_json(&codex_home.join("auth.json")) else {
         return String::new();
     };
     let Some(token) = auth
@@ -441,6 +616,89 @@ fn email() -> String {
         .ok()
         .and_then(|claims| claims.get("email").and_then(Value::as_str).map(str::to_string))
         .unwrap_or_default()
+}
+
+fn same_home(left: &std::path::Path, right: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => left == right,
+    }
+}
+
+pub fn profile_dirs() -> Vec<PathBuf> {
+    let dir = super::config::codex_dir();
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let hidden = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'));
+            if !hidden && path.join("auth.json").is_file() {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn emails_match(left: &str, right: &str) -> bool {
+    !left.is_empty() && left.eq_ignore_ascii_case(right)
+}
+
+/// Overwrite stored copies of the live CLI account with its current `auth.json`.
+/// Codex refresh tokens are single-use — a forked copy would invalidate the CLI
+/// (or go stale) unless it stays on the same lineage while that account is live.
+pub fn sync_live_profiles() {
+    let live = default_codex_home();
+    let live_email = email_from(&live);
+    if live_email.is_empty() {
+        return;
+    }
+    for path in profile_dirs() {
+        if emails_match(&email_from(&path), &live_email) {
+            if let Ok(auth) = read_json(&live.join("auth.json")) {
+                let _ = write_json(&path.join("auth.json"), &auth);
+            }
+        }
+    }
+}
+
+fn live_present() -> bool {
+    let live = default_codex_home();
+    live.join("auth.json").is_file() || live.join("sessions").is_dir()
+}
+
+/// `(account name, CODEX_HOME)` pairs to collect. A registered profile whose
+/// email matches the live CLI is collected from the live home so token refresh
+/// hits the CLI's `auth.json`.
+pub fn targets() -> Vec<(String, PathBuf)> {
+    sync_live_profiles();
+    let live = default_codex_home();
+    let live_email = email_from(&live);
+    let mut jobs = Vec::new();
+    let mut live_used = false;
+    for path in profile_dirs() {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("codex")
+            .to_string();
+        if emails_match(&email_from(&path), &live_email) {
+            if !live_used {
+                jobs.push((name, live.clone()));
+                live_used = true;
+            }
+        } else {
+            jobs.push((name, path));
+        }
+    }
+    if !live_used && (jobs.is_empty() || live_present()) {
+        jobs.push((CODEX_LIVE_ACCOUNT.to_string(), live));
+    }
+    jobs
 }
 
 fn title_case(value: &str) -> String {

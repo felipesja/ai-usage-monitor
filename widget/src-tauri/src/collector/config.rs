@@ -23,6 +23,21 @@ pub fn claude_dir() -> PathBuf {
     config_dir().join("claude")
 }
 
+pub fn codex_dir() -> PathBuf {
+    config_dir().join("codex")
+}
+
+/// Live Codex CLI home: `$CODEX_HOME` or `~/.codex`.
+pub fn default_codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".codex"))
+}
+
+/// Account name for an unregistered live CLI session. Stored profiles use
+/// their directory name, like Claude.
+pub const CODEX_LIVE_ACCOUNT: &str = "ChatGPT";
+
 pub fn cursor_config() -> PathBuf {
     config_dir().join("cursor.json")
 }

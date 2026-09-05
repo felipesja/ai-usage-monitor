@@ -37,7 +37,10 @@ except ModuleNotFoundError:
 APP = "ai-usage-monitor"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP
 CLAUDE_DIR = CONFIG_DIR / "claude"
+CODEX_DIR = CONFIG_DIR / "codex"
 CURSOR_CONFIG = CONFIG_DIR / "cursor.json"
+# Unregistered live Codex CLI session — stored profiles use their directory name.
+CODEX_LIVE_ACCOUNT = "ChatGPT"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 # Percentages at which a limit fires a notification, each level once as usage
 # rises through it. Editable in config.json ("alert_thresholds").
@@ -58,6 +61,10 @@ GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 GROK_TOKEN_URL = "https://auth.x.ai/oauth2/token"
 # Refresh the Grok CLI token when under this many seconds remain, matching Claude.
 GROK_REFRESH_BUFFER = 120
+CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+CODEX_REFRESH_BUFFER = 120
 CURSOR_EVENTS_URL = "https://cursor.com/api/dashboard/get-filtered-usage-events"
 # Cursor caps pageSize at 1000 (400 above that); 5 pages covers any real cycle.
 CURSOR_EVENTS_PAGE_SIZE = 1000
@@ -91,7 +98,7 @@ class Provider:
 
 def ensure_private_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    for candidate in (CONFIG_DIR, CLAUDE_DIR, path):
+    for candidate in (CONFIG_DIR, CLAUDE_DIR, CODEX_DIR, path):
         if candidate.exists():
             candidate.chmod(0o700)
 
@@ -278,6 +285,217 @@ def claude_login(name: str, email: str | None) -> None:
         if data is None:
             raise RuntimeError("login finished without creating a credential")
         register_claude(name, data)
+
+
+def default_codex_home() -> Path:
+    override = os.environ.get("CODEX_HOME")
+    return Path(override) if override else Path.home() / ".codex"
+
+
+def jwt_claims(token: str) -> dict[str, Any]:
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return claims if isinstance(claims, dict) else {}
+    except Exception:
+        return {}
+
+
+def jwt_email(token: str) -> str:
+    return str(jwt_claims(token).get("email") or "")
+
+
+def codex_email_from(home: Path) -> str:
+    try:
+        auth = read_json(home / "auth.json")
+        token = (auth.get("tokens") or {}).get("id_token") or ""
+        return jwt_email(token)
+    except Exception:
+        return ""
+
+
+def refresh_codex_auth(home: Path, force: bool = False) -> dict[str, Any]:
+    """Renew the ChatGPT access token in `$CODEX_HOME/auth.json` when it is stale."""
+    path = home / "auth.json"
+    data = read_json(path)
+    tokens = data.get("tokens") or {}
+    access = str(tokens.get("access_token") or "")
+    refresh = str(tokens.get("refresh_token") or "")
+    expires = float(jwt_claims(access).get("exp") or 0)
+    if not force and expires > time.time() + CODEX_REFRESH_BUFFER:
+        return data
+    if not refresh:
+        raise RuntimeError("session expired — log into this account in the Codex CLI, then add it again")
+    response = request_json(
+        CODEX_TOKEN_URL,
+        method="POST",
+        body={
+            "client_id": CODEX_CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "scope": "openid profile email",
+        },
+        timeout=30,
+    )
+    if not response.get("access_token"):
+        raise RuntimeError("ChatGPT token refresh did not return an access token")
+    tokens["access_token"] = response["access_token"]
+    if response.get("refresh_token"):
+        tokens["refresh_token"] = response["refresh_token"]
+    if response.get("id_token"):
+        tokens["id_token"] = response["id_token"]
+    data["tokens"] = tokens
+    data["last_refresh"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    write_private_json(path, data)
+    return data
+
+
+def _codex_window(block: Any) -> dict[str, Any] | None:
+    if not isinstance(block, dict) or not block:
+        return None
+    seconds = block.get("limit_window_seconds", block.get("window_seconds"))
+    minutes = (float(seconds) / 60) if isinstance(seconds, (int, float)) else block.get("windowDurationMins")
+    reset = block.get("reset_at", block.get("resets_at", block.get("resetsAt")))
+    percent = block.get("used_percent", block.get("usedPercent"))
+    return {"usedPercent": percent, "windowDurationMins": minutes, "resetsAt": reset}
+
+
+def _codex_usage_headers(tokens: dict[str, Any]) -> dict[str, str]:
+    access = str(tokens.get("access_token") or "")
+    if not access:
+        raise RuntimeError("Codex auth.json has no access token")
+    headers = {
+        "Authorization": f"Bearer {access}",
+        "User-Agent": "codex-cli",
+        "Accept": "application/json",
+    }
+    account_id = str(tokens.get("account_id") or "")
+    if account_id:
+        headers["ChatGPT-Account-Id"] = account_id
+    return headers
+
+
+def codex_http(home: Path) -> dict[str, Any]:
+    data = refresh_codex_auth(home)
+    try:
+        usage = request_json(CODEX_USAGE_URL, headers=_codex_usage_headers(data.get("tokens") or {}))
+    except RuntimeError as exc:
+        if "401" not in str(exc) and "403" not in str(exc):
+            raise
+        data = refresh_codex_auth(home, force=True)
+        usage = request_json(CODEX_USAGE_URL, headers=_codex_usage_headers(data.get("tokens") or {}))
+    rate = usage.get("rate_limit") or usage.get("rateLimit") or {}
+    return {
+        "rateLimits": {
+            "planType": usage.get("plan_type") or usage.get("planType") or "",
+            "primary": _codex_window(rate.get("primary_window") or rate.get("primary")),
+            "secondary": _codex_window(rate.get("secondary_window") or rate.get("secondary")),
+            "credits": usage.get("credits") or rate.get("credits") or {},
+        }
+    }
+
+
+def emails_match(left: str, right: str) -> bool:
+    return bool(left) and left.lower() == right.lower()
+
+
+def codex_profile_dirs() -> list[Path]:
+    if not CODEX_DIR.exists():
+        return []
+    return sorted(
+        path
+        for path in CODEX_DIR.iterdir()
+        if not path.name.startswith(".") and (path / "auth.json").is_file()
+    )
+
+
+def write_codex_file_store(home: Path) -> None:
+    """Force file-backed credentials so a stored profile owns its auth.json."""
+    ensure_private_dir(home)
+    path = home / "config.toml"
+    path.write_text('cli_auth_credentials_store = "file"\n', encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def copy_codex_auth(source_home: Path, dest_home: Path) -> None:
+    source = source_home / "auth.json"
+    if not source.is_file():
+        raise RuntimeError(f"{source}: not found; run `codex login` first")
+    data = read_json(source)
+    tokens = data.get("tokens") or {}
+    if not tokens.get("id_token"):
+        raise RuntimeError("the source does not contain a Codex login")
+    write_private_json(dest_home / "auth.json", data)
+    write_codex_file_store(dest_home)
+
+
+def sync_codex_auth(source_home: Path, dest_home: Path) -> None:
+    source = source_home / "auth.json"
+    dest = dest_home / "auth.json"
+    if not source.is_file() or not dest.is_file():
+        return
+    try:
+        write_private_json(dest, read_json(source))
+    except (OSError, ValueError):
+        pass
+
+
+def sync_live_codex_profiles() -> None:
+    """Keep stored copies of the live CLI account on the same token lineage.
+
+    Codex refresh tokens are single-use. While the CLI is logged into a
+    registered account, the live `auth.json` is the one that gets refreshed;
+    copies would go stale (or invalidate the CLI) unless they are overwritten
+    with that current file.
+    """
+    live = default_codex_home()
+    live_email = codex_email_from(live)
+    if not live_email:
+        return
+    for path in codex_profile_dirs():
+        if emails_match(codex_email_from(path), live_email):
+            sync_codex_auth(live, path)
+
+
+def register_codex(name: str, source_home: Path) -> None:
+    name = safe_name(name)
+    copy_codex_auth(source_home, CODEX_DIR / name)
+    print(f"Codex profile '{name}' registered at {CODEX_DIR / name}")
+
+
+def codex_add(name: str, source: Path | None = None) -> None:
+    source_home = source if source is not None else default_codex_home()
+    if source is not None and source.name == "auth.json":
+        source_home = source.parent
+    register_codex(name, source_home)
+
+
+def codex_login(name: str) -> None:
+    name = safe_name(name)
+    with tempfile.TemporaryDirectory(prefix="ai-usage-codex-login-") as temp:
+        temp_dir = Path(temp)
+        try:
+            temp_dir.chmod(0o700)
+        except OSError:
+            pass
+        write_codex_file_store(temp_dir)
+        env = os.environ.copy()
+        binary = codex_bin()
+        env["PATH"] = f"{Path(binary).parent}{os.pathsep}{env.get('PATH', '')}"
+        env["CODEX_HOME"] = str(temp_dir)
+        try:
+            subprocess.run([*codex_argv("login")], env=env, check=True)
+        except FileNotFoundError:
+            raise RuntimeError("Codex CLI not found") from None
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"Codex login exited with code {exc.returncode}") from None
+        if not (temp_dir / "auth.json").is_file():
+            raise RuntimeError("login finished without creating auth.json")
+        register_codex(name, temp_dir)
 
 
 def refresh_claude(path: Path, data: dict[str, Any]) -> dict[str, Any]:
@@ -534,21 +752,24 @@ def codex_bin() -> str:
     return str(candidates[-1]) if candidates else (found or "codex")
 
 
-def codex_command(binary: str) -> list[str]:
+def codex_argv(*args: str) -> list[str]:
     # On Windows `which` resolves to the npm shim `codex.CMD`, which
     # CreateProcess cannot execute directly — it has to go through cmd.exe.
+    binary = codex_bin()
     if os.name == "nt" and binary.lower().endswith((".cmd", ".bat")):
-        return ["cmd.exe", "/C", binary, "app-server", "--stdio"]
-    return [binary, "app-server", "--stdio"]
+        return ["cmd.exe", "/C", binary, *args]
+    return [binary, *args]
 
 
-def codex_live() -> dict[str, Any]:
+def codex_live(home: Path) -> dict[str, Any]:
     binary = codex_bin()
     env = os.environ.copy()
     # codex is a Node script: make sure the node from the same dir is on PATH.
     env["PATH"] = f"{Path(binary).parent}{os.pathsep}{env.get('PATH', '')}"
+    env["CODEX_HOME"] = str(home)
+    home.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
-        codex_command(binary),
+        codex_argv("app-server", "--stdio"),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -599,9 +820,12 @@ def codex_live() -> dict[str, Any]:
             proc.kill()
 
 
-def codex_cached() -> dict[str, Any]:
-    session_dir = Path.home() / ".codex" / "sessions"
-    latest = max(session_dir.rglob("*.jsonl"), key=lambda path: path.stat().st_mtime)
+def codex_cached(home: Path) -> dict[str, Any]:
+    session_dir = home / "sessions"
+    files = list(session_dir.rglob("*.jsonl")) if session_dir.exists() else []
+    if not files:
+        raise RuntimeError("no local session found")
+    latest = max(files, key=lambda path: path.stat().st_mtime)
     found: dict[str, Any] | None = None
     with latest.open(encoding="utf-8") as stream:
         for line in stream:
@@ -616,37 +840,40 @@ def codex_cached() -> dict[str, Any]:
     return {"rateLimits": found}
 
 
-def codex_email() -> str:
+def is_live_codex_home(home: Path) -> bool:
     try:
-        auth = read_json(Path.home() / ".codex" / "auth.json")
-        token = (auth.get("tokens") or {}).get("id_token") or ""
-        payload = token.split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload))
-        return str(claims.get("email") or "")
-    except Exception:
-        return ""
+        return home.resolve() == default_codex_home().resolve()
+    except OSError:
+        return home == default_codex_home()
 
 
-def collect_codex() -> Provider:
+def collect_codex(home: Path | None = None, account: str = CODEX_LIVE_ACCOUNT) -> Provider:
+    home = home or default_codex_home()
+    email = codex_email_from(home)
     try:
         live_error = ""
         try:
-            data = codex_live()
+            # Live CLI home: let the Codex process refresh `~/.codex/auth.json`.
+            # Stored profiles: HTTP + our own refresh, so a stale copy still works
+            # without spawning a second app-server (and without touching the CLI).
+            data = codex_live(home) if is_live_codex_home(home) else codex_http(home)
         except Exception as exc:
-            data = codex_cached()
             live_error = str(exc) or type(exc).__name__
             try:
                 log_path = Path(tempfile.gettempdir()) / "ai-usage-codex.log"
                 with log_path.open("a", encoding="utf-8") as log:
-                    log.write(f"{dt.datetime.now():%H:%M:%S} codex_live failed: {live_error}\n")
+                    log.write(f"{dt.datetime.now():%H:%M:%S} codex collect failed: {live_error}\n")
             except OSError:
                 pass
+            try:
+                data = codex_cached(home)
+            except Exception:
+                return Provider("Codex", account, email=email, error=codex_error_message(live_error))
         raw = data.get("rateLimits") or {}
         plan = raw.get("planType", raw.get("plan_type", ""))
-        result = Provider("Codex", "ChatGPT", str(plan).replace("_", " ").title(), codex_email())
+        result = Provider("Codex", account, str(plan).replace("_", " ").title(), email)
         if live_error:
-            result.details.append(f"⚠ local cache · app-server: {live_error}")
+            result.details.append(f"⚠ local cache · {codex_error_message(live_error)}")
         for key in ("primary", "secondary"):
             block = raw.get(key)
             if not block:
@@ -663,7 +890,43 @@ def collect_codex() -> Provider:
             result.details.append(f"Credits: {credits.get('balance', '?')}")
         return result
     except Exception as exc:
-        return Provider("Codex", "ChatGPT", error=str(exc))
+        return Provider("Codex", account, email=email, error=codex_error_message(str(exc)))
+
+
+def codex_error_message(live_error: str) -> str:
+    text = live_error.lower()
+    if any(part in text for part in ("authentication required", "unauthorized", "invalid_grant", "401", "403")):
+        return "session expired — log into this account in the Codex CLI, then add it again"
+    return live_error
+
+
+def live_codex_present() -> bool:
+    live = default_codex_home()
+    return (live / "auth.json").is_file() or (live / "sessions").exists()
+
+
+def codex_collect_jobs() -> list[tuple[Path, str]]:
+    """Homes to query: stored profiles plus the live CLI when it is a new account.
+
+    A registered profile whose email matches the live CLI is collected from
+    the live home (and labeled with the profile name) so token refresh hits
+    the CLI's `auth.json`, not a copy.
+    """
+    sync_live_codex_profiles()
+    live = default_codex_home()
+    live_email = codex_email_from(live)
+    jobs: list[tuple[Path, str]] = []
+    live_used = False
+    for path in codex_profile_dirs():
+        if live_email and emails_match(codex_email_from(path), live_email):
+            if not live_used:
+                jobs.append((live, path.name))
+                live_used = True
+        else:
+            jobs.append((path, path.name))
+    if not live_used and (not jobs or live_codex_present()):
+        jobs.append((live, CODEX_LIVE_ACCOUNT))
+    return jobs
 
 
 def next_month(epoch_ms: int) -> str:
@@ -1096,28 +1359,52 @@ def mark_standby(results: list[Provider]) -> None:
         item.standby = item.account not in in_use
 
 
+def mark_codex_standby(results: list[Provider]) -> None:
+    """Flag stored Codex accounts that are not the live CLI login."""
+    items = [item for item in results if item.name == "Codex" and item.error is None]
+    if len(items) < 2:
+        return
+    live_email = codex_email_from(default_codex_home()).lower()
+    if not live_email:
+        return
+    in_use = {item.account for item in items if item.email.lower() == live_email}
+    if not in_use or len(in_use) == len(items):
+        return
+    for item in items:
+        item.standby = item.account not in in_use
+
+
 def collect_all() -> list[Provider]:
     claude_profiles = sorted(path.parent for path in CLAUDE_DIR.glob("*/.credentials.json")) if CLAUDE_DIR.exists() else []
-    jobs = [("claude", profile) for profile in claude_profiles] + [
-        ("codex", None),
-        ("cursor", None),
-        ("grok", None),
+    jobs: list[tuple[str, Path | None, str | None]] = [
+        ("claude", profile, None) for profile in claude_profiles
     ]
+    codex_jobs = [("codex", home, name) for home, name in codex_collect_jobs()]
+    jobs.extend((("cursor", None, None), ("grok", None, None)))
 
-    def run(job: tuple[str, Path | None]) -> Provider:
-        kind, path = job
+    def run(job: tuple[str, Path | None, str | None]) -> Provider:
+        kind, path, account = job
         if kind == "claude":
             assert path is not None
             return collect_claude(path)
         if kind == "codex":
-            return collect_codex()
+            assert path is not None
+            return collect_codex(path, account or CODEX_LIVE_ACCOUNT)
         if kind == "cursor":
             return collect_cursor()
         return collect_grok()
 
+    # Two Codex app-servers at once time out or steal each other's auth.
+    # Collect those homes one after another; everything else can overlap.
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(jobs))) as pool:
-        results = list(pool.map(run, jobs))
+        other = [pool.submit(run, job) for job in jobs]
+        codex_results = [run(job) for job in codex_jobs]
+        results = [future.result() for future in other[: len(claude_profiles)]]
+        results.extend(codex_results)
+        results.extend(future.result() for future in other[len(claude_profiles) :])
+    sync_live_codex_profiles()
     mark_standby(results)
+    mark_codex_standby(results)
     return results
 
 
@@ -1575,7 +1862,7 @@ def doctor() -> None:
     ensure_config_file()
     print(f"Config: {CONFIG_DIR}")
     print(f"Claude: {len(list(CLAUDE_DIR.glob('*/.credentials.json'))) if CLAUDE_DIR.exists() else 0} profile(s)")
-    print(f"Codex CLI: {'ok' if shutil.which('codex') else 'not found'}")
+    print(f"Codex: {len(codex_profile_dirs())} profile(s); CLI: {'ok' if shutil.which('codex') else 'not found'}")
     print(f"Cursor: {'configured' if CURSOR_CONFIG.exists() else 'not configured'}")
     print(f"Grok: {'logged in' if grok_auth_path().exists() else 'no local session'}")
     print(f"Alerts: {', '.join(f'{t}%' for t in load_alert_thresholds())} ({CONFIG_FILE.name})")
@@ -1601,6 +1888,11 @@ def parser() -> argparse.ArgumentParser:
     login.add_argument("name")
     login.add_argument("--email")
     sub.add_parser("claude-list", help="list Claude profiles")
+    codex_add_cmd = sub.add_parser("codex-add", help="capture the currently active Codex session")
+    codex_add_cmd.add_argument("name")
+    codex_add_cmd.add_argument("--source", type=Path, default=None)
+    sub.add_parser("codex-login", help="authenticate a Codex account without changing the default session").add_argument("name")
+    sub.add_parser("codex-list", help="list Codex profiles")
     sub.add_parser("cursor-cookie", help="register the Cursor dashboard cookie")
     admin = sub.add_parser("cursor-admin", help="register a Cursor Admin API Key")
     admin.add_argument("--email", required=True)
@@ -1627,6 +1919,14 @@ def main() -> int:
         elif command == "claude-list":
             for path in sorted(CLAUDE_DIR.glob("*/.credentials.json")) if CLAUDE_DIR.exists() else []:
                 print(path.parent.name)
+        elif command == "codex-add":
+            codex_add(args.name, args.source)
+        elif command == "codex-login":
+            codex_login(args.name)
+        elif command == "codex-list":
+            for path in codex_profile_dirs():
+                email = codex_email_from(path)
+                print(f"{path.name}\t{email}" if email else path.name)
         elif command == "cursor-cookie":
             cursor_cookie()
         elif command == "cursor-admin":
