@@ -69,9 +69,11 @@ fn by_cookie(config: &Value) -> Result<Provider, String> {
     let membership = title_case(data.get("membershipType").and_then(Value::as_str).unwrap_or("Team"));
     let mut provider = Provider::new("Cursor", "Business", &membership, &email);
 
+    // Team/enterprise seats report a plain `overall` (used/limit in cents)
+    // instead of the consumer `plan` block.
     let plan = data
         .get("individualUsage")
-        .and_then(|usage| usage.get("plan"))
+        .and_then(|usage| usage.get("plan").or_else(|| usage.get("overall")))
         .cloned()
         .unwrap_or(Value::Null);
     let (used, total, included) = plan_usage(&plan);

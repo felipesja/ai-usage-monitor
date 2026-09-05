@@ -690,7 +690,10 @@ def collect_cursor() -> Provider:
             except Exception:
                 pass
             result = Provider("Cursor", "Business", str(data.get("membershipType", "Team")).title(), email)
-            plan = (data.get("individualUsage") or {}).get("plan") or {}
+            individual = data.get("individualUsage") or {}
+            # Team/enterprise seats report a plain `overall` (used/limit in
+            # cents) instead of the consumer `plan` block.
+            plan = individual.get("plan") or individual.get("overall") or {}
             used, total, included = cursor_plan_usage(plan)
             percent = used * 100 / total if total else None
 
