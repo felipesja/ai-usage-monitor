@@ -2,6 +2,7 @@
 //! failure, falls back to the local session cache — flagging the downgrade in
 //! `details`, like the Python collector.
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -592,6 +593,218 @@ fn newest_jsonl(dir: &std::path::Path) -> Option<PathBuf> {
         }
     }
     best.map(|(_, path)| path)
+}
+
+/// CLIProxyAPI keeps one JSON credential per account in this directory next to
+/// the home it serves.
+const CLIPROXY_DIR_NAME: &str = ".cli-proxy-api";
+const LOOPBACK_HOSTS: [&str; 4] = ["127.0.0.1", "localhost", "0.0.0.0", "[::1]"];
+
+/// The ChatGPT account that is burning Codex quota right now, lowercased.
+///
+/// Mirrors `codex_active_email` in `cli/usage_monitor.py`: the login of the CLI
+/// home used last, unless that home routes through a local proxy — then the
+/// proxy, not `auth.json`, decides which account pays for the traffic.
+pub fn active_email() -> String {
+    let home = active_home();
+    if let Some(proxy) = local_proxy_home(&home) {
+        if let Some(email) = cliproxy_emails(&proxy).into_iter().next() {
+            return email;
+        }
+    }
+    email_from(&home).to_lowercase()
+}
+
+/// Every Codex CLI home on this machine that holds a login, both sides of WSL.
+fn homes() -> Vec<PathBuf> {
+    let mut homes = vec![default_codex_home()];
+    homes.extend(super::machine_homes().into_iter().map(|home| home.join(".codex")));
+    homes.dedup();
+    homes.retain(|home| home.join("auth.json").is_file());
+    homes
+}
+
+/// When this CLI home was last used. `history.jsonl` is appended on every
+/// prompt, so it tracks real use; a token refresh rewrites `auth.json` on its
+/// own, which is why that file only stands in for a home with no history yet
+/// (a fresh login).
+fn home_activity(home: &std::path::Path) -> SystemTime {
+    for name in ["history.jsonl", "auth.json"] {
+        if let Ok(stamp) = std::fs::metadata(home.join(name)).and_then(|meta| meta.modified()) {
+            return stamp;
+        }
+    }
+    UNIX_EPOCH
+}
+
+/// The Codex CLI home in use — the most recently used one.
+fn active_home() -> PathBuf {
+    homes()
+        .into_iter()
+        .max_by_key(|home| home_activity(home))
+        .unwrap_or_else(default_codex_home)
+}
+
+/// The home of the local proxy this Codex home routes through, or `None`.
+///
+/// A `model_provider` pointing at a loopback `base_url` means the CLI does not
+/// talk to ChatGPT with its own `auth.json` — a router in front of it picks the
+/// account, so `auth.json` says nothing about which quota is burning.
+fn local_proxy_home(codex_home: &std::path::Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(codex_home.join("config.toml")).ok()?;
+    let mut provider = String::new();
+    let mut section = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(name) = section_name(line) {
+            section = name;
+        } else if section.is_empty() {
+            if let Some(value) = toml_string(line, "model_provider") {
+                provider = value;
+            }
+        }
+    }
+    if provider.is_empty() || provider == "openai" {
+        return None;
+    }
+    let wanted = format!("model_providers.{provider}");
+    let mut section = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(name) = section_name(line) {
+            section = name;
+            continue;
+        }
+        if section != wanted {
+            continue;
+        }
+        if let Some(url) = toml_string(line, "base_url") {
+            if LOOPBACK_HOSTS.iter().any(|host| url.contains(host)) {
+                return codex_home.parent().map(std::path::Path::to_path_buf);
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// The name of a TOML section header line, or `None` for any other line.
+fn section_name(line: &str) -> Option<String> {
+    let inner = line.strip_prefix('[')?.strip_suffix(']')?;
+    Some(inner.replace('"', ""))
+}
+
+/// The value of a `key = "..."` TOML line, or `None` when it is not that key.
+fn toml_string(line: &str, key: &str) -> Option<String> {
+    let rest = line.strip_prefix(key)?.trim_start().strip_prefix('=')?.trim();
+    let value = rest.strip_prefix('"')?;
+    let end = value.find('"')?;
+    Some(value[..end].to_string())
+}
+
+/// CLIProxyAPI's credential directory for this home (`auth-dir` in its config).
+fn cliproxy_auth_dir(home: &std::path::Path) -> PathBuf {
+    let default = home.join(CLIPROXY_DIR_NAME);
+    let Ok(text) = std::fs::read_to_string(default.join("config.yaml")) else {
+        return default;
+    };
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("auth-dir:") else {
+            continue;
+        };
+        let value = rest.split('#').next().unwrap_or_default().trim().trim_matches('"');
+        if value.is_empty() {
+            break;
+        }
+        return match value.strip_prefix("~/") {
+            Some(relative) => home.join(relative),
+            None => PathBuf::from(value),
+        };
+    }
+    default
+}
+
+/// The credential a `.cds` cooldown sidecar parks, or `None`.
+///
+/// The proxy writes one of these next to the credential when a provider turns
+/// it away (`save-cooldown-status`), and keeps it after recovery — a record
+/// only means the account is out while its retry time is still ahead.
+fn cliproxy_cooling_auth(path: &std::path::Path, now: i64) -> Option<String> {
+    let data = read_json(path).ok()?;
+    for record in data.get("records")?.as_array()? {
+        let retry = record
+            .get("next_retry_after")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                record
+                    .get("quota")
+                    .and_then(|quota| quota.get("next_recover_at"))
+                    .and_then(Value::as_str)
+            });
+        if retry.and_then(super::date::iso_to_epoch).is_some_and(|moment| moment > now) {
+            return Some(
+                data.get("auth_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().into_owned()),
+            );
+        }
+    }
+    None
+}
+
+/// The proxy's Codex accounts in the order it would spend them, lowercased.
+///
+/// Each credential is one JSON file in the proxy's auth dir. Under the
+/// `fill-first` strategy the enabled entry with the highest `priority` goes
+/// first (ties to the most recently refreshed one), and `quota-exceeded`
+/// failover moves to the next one as each is spent — so the head of this list
+/// is the account paying for the traffic right now.
+fn cliproxy_emails(home: &std::path::Path) -> Vec<String> {
+    let directory = cliproxy_auth_dir(home);
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    files.sort();
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default();
+    let cooling: HashSet<String> = files
+        .iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("cds"))
+        .filter_map(|path| cliproxy_cooling_auth(path, now))
+        .collect();
+
+    let mut candidates: Vec<(i64, String, String)> = Vec::new();
+    for path in &files {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if cooling.contains(name.as_ref()) {
+            continue;
+        }
+        let Ok(data) = read_json(path) else { continue };
+        if data.get("type").and_then(Value::as_str) != Some("codex")
+            || data.get("disabled").and_then(Value::as_bool).unwrap_or(false)
+        {
+            continue;
+        }
+        let email = data.get("email").and_then(Value::as_str).unwrap_or_default().trim();
+        if email.is_empty() {
+            continue;
+        }
+        candidates.push((
+            data.get("priority").and_then(Value::as_i64).unwrap_or(0),
+            data.get("last_refresh").and_then(Value::as_str).unwrap_or_default().to_string(),
+            email.to_lowercase(),
+        ));
+    }
+    candidates.sort_by(|left, right| right.cmp(left));
+    candidates.into_iter().map(|(_, _, email)| email).collect()
 }
 
 /// Email from the `id_token` claims in `$CODEX_HOME/auth.json`.

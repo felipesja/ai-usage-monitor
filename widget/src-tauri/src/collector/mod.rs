@@ -190,7 +190,12 @@ fn mark_standby(providers: &mut [Provider]) {
     }
 }
 
-/// Flag stored Codex accounts that are not the live CLI login.
+/// Flag the Codex accounts that are not the one in use.
+///
+/// The account in use is the login of the Codex CLI that was used last (see
+/// `codex::active_email`) — which is not always the local `~/.codex/auth.json`:
+/// the CLI may live on the other side of WSL, and it may route through a local
+/// proxy that picks the account itself.
 fn mark_codex_standby(providers: &mut [Provider]) {
     let count = providers
         .iter()
@@ -199,7 +204,7 @@ fn mark_codex_standby(providers: &mut [Provider]) {
     if count < 2 {
         return;
     }
-    let live_email = codex::email_from(&config::default_codex_home()).to_lowercase();
+    let live_email = codex::active_email();
     if live_email.is_empty() {
         return;
     }
@@ -351,12 +356,30 @@ fn claude_config_sources() -> Vec<ClaudeSource> {
     sources
 }
 
-/// The CLI configs inside WSL, seen from Windows. Only *running* distros are
+/// The Claude CLI configs living in the other environment.
+fn other_side_claude_configs() -> Vec<ClaudeSource> {
+    let mut paths = Vec::new();
+    for home in other_side_homes() {
+        paths.push(default_claude_source(&home));
+        paths.extend(custom_dir_claude_configs(&home));
+    }
+    paths
+}
+
+/// Every home directory a CLI on this machine may write to.
+pub fn machine_homes() -> Vec<PathBuf> {
+    let mut homes = vec![config::home()];
+    homes.extend(other_side_homes());
+    homes.dedup();
+    homes
+}
+
+/// Home directories inside WSL, seen from Windows. Only *running* distros are
 /// listed: reaching into `\\wsl.localhost\<name>` of a stopped one would boot
 /// its VM on every refresh. `wsl.exe --list` reads the registry, boots nothing,
 /// and answers in ~200 ms.
 #[cfg(windows)]
-fn other_side_claude_configs() -> Vec<ClaudeSource> {
+fn other_side_homes() -> Vec<PathBuf> {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -375,42 +398,39 @@ fn other_side_claude_configs() -> Vec<ClaudeSource> {
         .collect();
     let listing = String::from_utf16_lossy(&units);
 
-    let mut paths = Vec::new();
+    let mut homes = Vec::new();
     for name in listing.lines().map(str::trim).filter(|name| !name.is_empty()) {
         let root = PathBuf::from(format!(r"\\wsl.localhost\{name}"));
-        paths.push(default_claude_source(&root.join("root")));
-        paths.extend(custom_dir_claude_configs(&root.join("root")));
+        homes.push(root.join("root"));
         if let Ok(entries) = fs::read_dir(root.join("home")) {
             for entry in entries.flatten() {
-                paths.push(default_claude_source(&entry.path()));
-                paths.extend(custom_dir_claude_configs(&entry.path()));
+                homes.push(entry.path());
             }
         }
     }
-    paths
+    homes
 }
 
-/// The CLI configs on the Windows profiles, seen from WSL through /mnt.
+/// The Windows user profiles, seen from WSL through /mnt.
 #[cfg(target_os = "linux")]
-fn other_side_claude_configs() -> Vec<ClaudeSource> {
-    let mut paths = Vec::new();
+fn other_side_homes() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
     let Ok(drives) = fs::read_dir("/mnt") else {
-        return paths;
+        return homes;
     };
     for drive in drives.flatten() {
         if let Ok(users) = fs::read_dir(drive.path().join("Users")) {
             for user in users.flatten() {
-                paths.push(default_claude_source(&user.path()));
-                paths.extend(custom_dir_claude_configs(&user.path()));
+                homes.push(user.path());
             }
         }
     }
-    paths
+    homes
 }
 
-/// macOS (and any other Unix): only the local sources exist.
+/// macOS (and any other Unix): only the local home exists.
 #[cfg(not(any(windows, target_os = "linux")))]
-fn other_side_claude_configs() -> Vec<ClaudeSource> {
+fn other_side_homes() -> Vec<PathBuf> {
     Vec::new()
 }
 

@@ -56,6 +56,11 @@ CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_SESSION_SECONDS = 5 * 3600  # the 5h quota window, also the standby horizon
 CLAUDE_CONFIG_TIE_SECONDS = 600  # environments this close apart are both in use
 CLAUDE_ACTIVE_ACCOUNT_FILE = CONFIG_DIR / "claude-active-account.json"
+# CLIProxyAPI keeps one JSON credential per account in this directory next to
+# the home it serves; a Codex CLI pointed at it burns the quota of the account
+# *the proxy* picks, not the one in its own auth.json.
+CLIPROXY_DIR_NAME = ".cli-proxy-api"
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "0.0.0.0", "[::1]")
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 GROK_TOKEN_URL = "https://auth.x.ai/oauth2/token"
@@ -594,6 +599,21 @@ def cursor_plan_usage(plan: dict[str, Any]) -> tuple[float, float, float]:
     return min(used, total), total, included
 
 
+def parse_iso(value: Any) -> float | None:
+    """ISO-8601 → epoch seconds, or None. Sub-microsecond precision (what Go
+    writes) is truncated first — `fromisoformat` rejects it."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = re.sub(r"(\.\d{6})\d+", r"", value.strip()).replace("Z", "+00:00")
+    try:
+        moment = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    return moment.timestamp()
+
+
 def cursor_epoch(value: Any) -> float | None:
     """`billingCycleStart`/`End` as epoch seconds. The dashboard payload uses
     ISO-8601 strings; accept a raw epoch-ms number too, defensively."""
@@ -601,10 +621,7 @@ def cursor_epoch(value: Any) -> float | None:
         return None
     if isinstance(value, (int, float)):
         return float(value) / 1000
-    try:
-        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
+    return parse_iso(value)
 
 
 def cursor_events(token: str, start: float, end: float) -> list[tuple[float, float]]:
@@ -1194,8 +1211,8 @@ def session_active(provider: Provider) -> bool:
     return moment > dt.datetime.now(dt.timezone.utc)
 
 
-def wsl_claude_configs() -> list[tuple[Path, Path]]:
-    """The CLI configs inside WSL, seen from Windows.
+def wsl_homes() -> list[Path]:
+    """Home directories inside WSL, seen from Windows.
 
     Only *running* distros are listed: reaching into `\\\\wsl.localhost\\<name>`
     of a stopped one would boot its VM on every refresh. `wsl.exe --list` reads
@@ -1212,32 +1229,52 @@ def wsl_claude_configs() -> list[tuple[Path, Path]]:
         return []
     # wsl.exe writes UTF-16LE.
     names = [line.strip() for line in proc.stdout.decode("utf-16-le", "ignore").splitlines()]
-    paths: list[Path] = []
+    homes: list[Path] = []
     for name in filter(None, names):
         root = Path(f"\\\\wsl.localhost\\{name}")
-        paths.append(default_claude_source(root / "root"))
-        paths.extend(custom_dir_claude_configs(root / "root"))
+        homes.append(root / "root")
         try:
-            for home in sorted((root / "home").iterdir()):
-                paths.append(default_claude_source(home))
-                paths.extend(custom_dir_claude_configs(home))
+            homes.extend(sorted((root / "home").iterdir()))
         except OSError:
             pass
-    return paths
+    return homes
 
 
-def windows_claude_configs() -> list[tuple[Path, Path]]:
-    """The CLI configs on the Windows profiles, seen from WSL through /mnt."""
+def windows_homes() -> list[Path]:
+    """The Windows user profiles, seen from WSL through /mnt."""
     if not Path("/mnt").is_dir():
         return []
     try:
-        paths = []
-        for home in sorted(Path("/mnt").glob("*/Users/*")):
-            paths.append(default_claude_source(home))
-            paths.extend(custom_dir_claude_configs(home))
-        return paths
+        return sorted(Path("/mnt").glob("*/Users/*"))
     except OSError:
         return []
+
+
+def other_side_homes() -> list[Path]:
+    """Home directories of the *other* environment on this machine.
+
+    Windows and WSL run separate CLIs against the same accounts; macOS has no
+    second side, so there the local home is the whole story.
+    """
+    if os.name == "nt":
+        return wsl_homes()
+    if sys.platform.startswith("linux"):
+        return windows_homes()
+    return []
+
+
+def machine_homes() -> list[Path]:
+    """Every home directory a CLI on this machine may write to."""
+    return list(dict.fromkeys([Path.home(), *other_side_homes()]))
+
+
+def other_side_claude_configs() -> list[tuple[Path, Path]]:
+    """The Claude CLI configs living in the other environment."""
+    paths: list[tuple[Path, Path]] = []
+    for home in other_side_homes():
+        paths.append(default_claude_source(home))
+        paths.extend(custom_dir_claude_configs(home))
+    return paths
 
 
 def default_claude_source(home: Path) -> tuple[Path, Path]:
@@ -1271,10 +1308,7 @@ def claude_config_sources() -> list[tuple[Path, Path]]:
         sources.append((Path(override) / ".claude.json", Path(override) / "history.jsonl"))
     sources.append(default_claude_source(Path.home()))
     sources.extend(custom_dir_claude_configs(Path.home()))
-    if os.name == "nt":
-        sources.extend(wsl_claude_configs())
-    elif sys.platform.startswith("linux"):
-        sources.extend(windows_claude_configs())
+    sources.extend(other_side_claude_configs())
     return list(dict.fromkeys(sources))
 
 
@@ -1359,12 +1393,155 @@ def mark_standby(results: list[Provider]) -> None:
         item.standby = item.account not in in_use
 
 
+def codex_homes() -> list[Path]:
+    """Every Codex CLI home on this machine that holds a login, both sides of WSL."""
+    homes = [default_codex_home(), *(home / ".codex" for home in machine_homes())]
+    return [home for home in dict.fromkeys(homes) if (home / "auth.json").is_file()]
+
+
+def codex_home_activity(home: Path) -> float:
+    """When this CLI home was last used, as an epoch.
+
+    `history.jsonl` is appended on every prompt, so it tracks real use; a token
+    refresh rewrites `auth.json` on its own, which is why that file only stands
+    in for a home that has no history yet (a fresh login).
+    """
+    for name in ("history.jsonl", "auth.json"):
+        try:
+            return (home / name).stat().st_mtime
+        except OSError:
+            continue
+    return 0.0
+
+
+def codex_active_home() -> Path:
+    """The Codex CLI home in use — the most recently used one."""
+    homes = codex_homes()
+    return max(homes, key=codex_home_activity) if homes else default_codex_home()
+
+
+def codex_local_proxy_home(home: Path) -> Path | None:
+    """The local proxy this Codex home routes through, or None.
+
+    A `model_provider` pointing at a loopback `base_url` means the CLI does not
+    talk to ChatGPT with its own `auth.json` — a router in front of it picks the
+    account, so `auth.json` says nothing about which quota is burning.
+    """
+    try:
+        text = (home / "config.toml").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    provider = re.search(r'^\s*model_provider\s*=\s*"([^"]+)"', text, re.M)
+    if not provider or provider.group(1) == "openai":
+        return None
+    block = re.search(
+        rf'^\s*\[model_providers\.{re.escape(provider.group(1))}\]([^\[]*)', text, re.M
+    )
+    if not block:
+        return None
+    url = re.search(r'^\s*base_url\s*=\s*"([^"]+)"', block.group(1), re.M)
+    if not url or not any(host in url.group(1) for host in LOOPBACK_HOSTS):
+        return None
+    return home.parent
+
+
+def cliproxy_auth_dir(home: Path) -> Path:
+    """CLIProxyAPI's credential directory for this home (`auth-dir` in its config)."""
+    default = home / CLIPROXY_DIR_NAME
+    try:
+        text = (default / "config.yaml").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return default
+    match = re.search(r'^\s*auth-dir:\s*"?([^"\n#]+)"?', text, re.M)
+    if not match:
+        return default
+    value = match.group(1).strip()
+    if value.startswith("~"):
+        return home / value.lstrip("~/\\") if value not in ("~", "~/") else home
+    return Path(value)
+
+
+def cliproxy_cooling_auth(path: Path, now: float) -> str:
+    """The credential a `.cds` cooldown sidecar parks, or "".
+
+    The proxy writes one of these next to the credential when a provider turns
+    it away (`save-cooldown-status`), and keeps it after recovery — a record
+    only means the account is out while its retry time is still ahead.
+    """
+    try:
+        data = read_json(path)
+    except (OSError, ValueError):
+        return ""
+    for record in data.get("records") or []:
+        if not isinstance(record, dict):
+            continue
+        retry = record.get("next_retry_after") or (record.get("quota") or {}).get("next_recover_at")
+        moment = parse_iso(retry)
+        if moment is not None and moment > now:
+            return str(data.get("auth_id") or path.name)
+    return ""
+
+
+def cliproxy_codex_emails(home: Path) -> list[str]:
+    """The proxy's Codex accounts in the order it would spend them, lowercased.
+
+    Each credential is one JSON file in the proxy's auth dir. Under the
+    `fill-first` strategy the enabled entry with the highest `priority` goes
+    first (ties to the most recently refreshed one), and `quota-exceeded`
+    failover moves to the next one as each is spent — so the head of this list
+    is the account paying for the traffic right now.
+    """
+    directory = cliproxy_auth_dir(home)
+    try:
+        files = sorted(directory.iterdir())
+    except OSError:
+        return []
+    now = time.time()
+    cooling = {
+        auth
+        for path in files
+        if path.suffix == ".cds" and (auth := cliproxy_cooling_auth(path, now))
+    }
+    candidates: list[tuple[float, str, str]] = []
+    for path in files:
+        if path.suffix != ".json" or path.name in cooling:
+            continue
+        try:
+            data = read_json(path)
+        except (OSError, ValueError):
+            continue
+        if str(data.get("type") or "") != "codex" or data.get("disabled"):
+            continue
+        email = str(data.get("email") or "").strip().lower()
+        if email:
+            candidates.append((float(data.get("priority") or 0), str(data.get("last_refresh") or ""), email))
+    candidates.sort(reverse=True)
+    return [email for _, _, email in candidates]
+
+
+def codex_active_email() -> str:
+    """The ChatGPT account that is burning Codex quota right now, lowercased."""
+    home = codex_active_home()
+    proxy_home = codex_local_proxy_home(home)
+    if proxy_home is not None:
+        emails = cliproxy_codex_emails(proxy_home)
+        if emails:
+            return emails[0]
+    return codex_email_from(home).lower()
+
+
 def mark_codex_standby(results: list[Provider]) -> None:
-    """Flag stored Codex accounts that are not the live CLI login."""
+    """Flag the Codex accounts that are not the one in use.
+
+    The account in use is the login of the Codex CLI that was used last (see
+    `codex_active_email`) — which is not always the local `~/.codex/auth.json`:
+    the CLI may live on the other side of WSL, and it may route through a local
+    proxy that picks the account itself.
+    """
     items = [item for item in results if item.name == "Codex" and item.error is None]
     if len(items) < 2:
         return
-    live_email = codex_email_from(default_codex_home()).lower()
+    live_email = codex_active_email()
     if not live_email:
         return
     in_use = {item.account for item in items if item.email.lower() == live_email}
